@@ -62,5 +62,9 @@ if (NOT DARLING_NO_EXECUTABLES)
 		DESTINATION libexec/darling/usr/share/file)
 	install(DIRECTORY magic/Magdir/
 		DESTINATION libexec/darling/usr/share/file/magic)
+
+	install(FILES ../file.1 DESTINATION libexec/darling/usr/share/man/man1)
+	install(FILES ../magic.5 DESTINATION libexec/darling/usr/share/man/man5)
+
 endif (NOT DARLING_NO_EXECUTABLES)
 
