@@ -18,19 +18,17 @@ add_definitions(
 )
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_POSIX_C_SOURCE -nostdinc -fPIC")
-set(CMAKE_SHARED_LINKER_FLAGS "-nodefaultlibs -nostdlib -Wl,--version-script=${DARLING_TOP_DIRECTORY}/darwin.map")
-set(CMAKE_EXE_LINKER_FLAGS "-nodefaultlibs -nostdlib -Wl,--version-script=${DARLING_TOP_DIRECTORY}/darwin.map")
 
 include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/..)
-include_directories(${DARLING_TOP_DIRECTORY}/src/libc/include/FreeBSD)
-include_directories(${DARLING_TOP_DIRECTORY}/src/libc/include/NetBSD)
-include_directories(${DARLING_TOP_DIRECTORY}/src/libc/gen)
-include_directories(${DARLING_TOP_DIRECTORY}/src/libc/darwin)
-include_directories(${DARLING_TOP_DIRECTORY}/src/libc/stdtime/FreeBSD)
-include_directories(${DARLING_TOP_DIRECTORY}/src/launchd/liblaunch)
-include_directories(${DARLING_TOP_DIRECTORY}/src/external/libdispatch)
-include_directories(${DARLING_TOP_DIRECTORY}/src/external/zlib)
-include_directories(${DARLING_TOP_DIRECTORY}/src/external/bzip2)
+include_directories(${CMAKE_SOURCE_DIR}/src/libc/include/FreeBSD)
+include_directories(${CMAKE_SOURCE_DIR}/src/libc/include/NetBSD)
+include_directories(${CMAKE_SOURCE_DIR}/src/libc/gen)
+include_directories(${CMAKE_SOURCE_DIR}/src/libc/darwin)
+include_directories(${CMAKE_SOURCE_DIR}/src/libc/stdtime/FreeBSD)
+include_directories(${CMAKE_SOURCE_DIR}/src/launchd/liblaunch)
+include_directories(${CMAKE_SOURCE_DIR}/src/external/libdispatch)
+include_directories(${CMAKE_SOURCE_DIR}/src/external/zlib)
+include_directories(${CMAKE_SOURCE_DIR}/src/external/bzip2)
 
 set(libmagic_sources
 	src/apprentice.c
@@ -51,14 +49,16 @@ set(libmagic_sources
 	src/softmagic.c
 )
 
-add_library(magic SHARED ${libmagic_sources})
-target_link_libraries(magic system)
-install(TARGETS magic
-	DESTINATION ${CMAKE_INSTALL_LIBDIR}/darling)
+add_library(magic OBJECT ${libmagic_sources})
+# The library is not present on real macOS
+#target_link_libraries(magic system)
+#install(TARGETS magic
+#	DESTINATION libexec/darling/usr/lib)
 
 if (NOT DARLING_NO_EXECUTABLES)
-	add_darling_executable(file src/file.c)
-	target_link_libraries(file magic)
+	add_darling_executable(file src/file.c
+		$<TARGET_OBJECTS:magic>)
+	target_link_libraries(file system z)
 
 	install(TARGETS file
 		DESTINATION libexec/darling/usr/bin)
