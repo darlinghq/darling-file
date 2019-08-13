@@ -49,7 +49,7 @@ set(libmagic_sources
 	src/softmagic.c
 )
 
-add_library(magic OBJECT ${libmagic_sources})
+add_darling_object_library(magic ${libmagic_sources})
 # The library is not present on real macOS
 #target_link_libraries(magic system)
 #install(TARGETS magic
