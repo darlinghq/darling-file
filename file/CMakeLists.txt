@@ -15,7 +15,7 @@ add_definitions(
 	-Wno-format-security
 )
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_POSIX_C_SOURCE -nostdinc -fPIC")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -nostdinc -fPIC")
 
 include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 include_directories(${CMAKE_SOURCE_DIR}/src/libc/include/FreeBSD)
