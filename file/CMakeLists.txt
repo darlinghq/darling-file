@@ -8,14 +8,16 @@ if(COMMAND cmake_policy)
 endif(COMMAND cmake_policy)
 
 include(darling_exe)
-add_definitions(-DHAVE_CONFIG_H -DMAGIC="/usr/share/file/magic")
+add_compile_definitions(
+	HAVE_CONFIG_H
+	MAGIC="/usr/share/file/magic"
+	BUILTIN_MACHO
+)
 
 add_definitions(
 	-Wno-non-literal-null-conversion
 	-Wno-format-security
 )
-
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -nostdinc -fPIC")
 
 include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
@@ -28,26 +30,32 @@ set(libmagic_sources
 	src/compress.c
 	src/encoding.c
 	src/fsmagic.c
+	src/der.c
 	src/funcs.c
 	src/is_tar.c
 	src/magic.c
 	src/print.c
+	src/is_json.c
+	src/buffer.c
 	src/readcdf.c
 	src/readelf.c
 	src/readmacho.c
 	src/softmagic.c
 )
 
-add_darling_object_library(magic ${libmagic_sources})
+add_darling_static_library(magic FAT SOURCES ${libmagic_sources})
 # The library is not present on real macOS
-#target_link_libraries(magic system)
 #install(TARGETS magic
 #	DESTINATION libexec/darling/usr/lib)
 
 if (NOT DARLING_NO_EXECUTABLES)
-	add_darling_executable(file src/file.c
-		$<TARGET_OBJECTS:magic>)
-	target_link_libraries(file system z)
+	add_darling_executable(file src/file.c)
+	target_link_libraries(file
+		magic
+		z
+
+		system
+	)
 
 	install(TARGETS file
 		DESTINATION libexec/darling/usr/bin)
