@@ -27,10 +27,11 @@
 #include "file.h"
 
 #ifndef	lint
-FILE_RCSID("@(#)$File: funcs.c,v 1.54 2009/05/08 17:41:59 christos Exp $")
+FILE_RCSID("@(#)$File: funcs.c,v 1.104 2019/05/07 02:27:11 christos Exp $")
 #endif	/* lint */
 
 #include "magic.h"
+#include <assert.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,9 +42,7 @@ FILE_RCSID("@(#)$File: funcs.c,v 1.54 2009/05/08 17:41:59 christos Exp $")
 #if defined(HAVE_WCTYPE_H)
 #include <wctype.h>
 #endif
-#if defined(HAVE_LIMITS_H)
 #include <limits.h>
-#endif
 
 #ifndef SIZE_MAX
 #define SIZE_MAX	((size_t)~0)
@@ -58,6 +57,8 @@ file_vprintf(struct magic_set *ms, const char *fmt, va_list ap)
 	int len;
 	char *buf, *newstr;
 
+	if (ms->event_flags & EVENT_HAD_ERR)
+		return 0;
 	len = vasprintf(&buf, fmt, ap);
 	if (len < 0)
 		goto out;
@@ -73,7 +74,7 @@ file_vprintf(struct magic_set *ms, const char *fmt, va_list ap)
 	ms->o.buf = buf;
 	return 0;
 out:
-	file_error(ms, errno, "vasprintf failed");
+	fprintf(stderr, "vasprintf failed (%s)", strerror(errno));
 	return -1;
 }
 
@@ -93,6 +94,7 @@ file_printf(struct magic_set *ms, const char *fmt, ...)
  * error - print best error message possible
  */
 /*VARARGS*/
+__attribute__((__format__(__printf__, 3, 0)))
 private void
 file_error_core(struct magic_set *ms, int error, const char *f, va_list va,
     size_t lineno)
@@ -103,11 +105,13 @@ file_error_core(struct magic_set *ms, int error, const char *f, va_list va,
 	if (lineno != 0) {
 		free(ms->o.buf);
 		ms->o.buf = NULL;
-		file_printf(ms, "line %zu: ", lineno);
+		(void)file_printf(ms, "line %" SIZE_T_FORMAT "u:", lineno);
 	}
-	file_vprintf(ms, f, va);
+	if (ms->o.buf && *ms->o.buf)
+		(void)file_printf(ms, " ");
+	(void)file_vprintf(ms, f, va);
 	if (error > 0)
-		file_printf(ms, " (%s)", strerror(error));
+		(void)file_printf(ms, " (%s)", strerror(error));
 	ms->event_flags |= EVENT_HAD_ERR;
 	ms->error = error;
 }
@@ -138,7 +142,8 @@ file_magerror(struct magic_set *ms, const char *f, ...)
 protected void
 file_oomem(struct magic_set *ms, size_t len)
 {
-	file_error(ms, errno, "cannot allocate %zu bytes", len);
+	file_error(ms, errno, "cannot allocate %" SIZE_T_FORMAT "u bytes",
+	    len);
 }
 
 protected void
@@ -154,43 +159,88 @@ file_badread(struct magic_set *ms)
 }
 
 #ifndef COMPILE_ONLY
+
 protected int
-file_buffer(struct magic_set *ms, int fd, const char *inname, const void *buf,
-    size_t nb)
+file_separator(struct magic_set *ms)
 {
-	int m = 0, rv = 0, looks_text = 0;
-	int mime = ms->flags & MAGIC_MIME;
-	const unsigned char *ubuf = CAST(const unsigned char *, buf);
-	unichar *u8buf = NULL;
-	size_t ulen;
-	const char *code = NULL;
-	const char *code_mime = "binary";
-	const char *type = NULL;
+	return file_printf(ms, "\n- ");
+}
 
-
-
-	if (nb == 0) {
-		if ((!mime || (mime & MAGIC_MIME_TYPE)) &&
-		    file_printf(ms, mime ? "application/x-empty" :
-		    "empty") == -1)
-			return -1;
+static int
+checkdone(struct magic_set *ms, int *rv)
+{
+	if ((ms->flags & MAGIC_CONTINUE) == 0)
 		return 1;
-	} else if (nb == 1) {
-		if ((!mime || (mime & MAGIC_MIME_TYPE)) &&
-		    file_printf(ms, mime ? "application/octet-stream" :
-		    "very short file (no magic)") == -1)
+	if (file_separator(ms) == -1)
+		*rv = -1;
+	return 0;
+}
+
+protected int
+file_default(struct magic_set *ms, size_t nb)
+{
+	if (ms->flags & MAGIC_MIME) {
+		if ((ms->flags & MAGIC_MIME_TYPE) &&
+		    file_printf(ms, "application/%s",
+			nb ? "octet-stream" : "x-empty") == -1)
 			return -1;
 		return 1;
 	}
+	if (ms->flags & MAGIC_APPLE) {
+		if (file_printf(ms, "UNKNUNKN") == -1)
+			return -1;
+		return 1;
+	}
+	if (ms->flags & MAGIC_EXTENSION) {
+		if (file_printf(ms, "???") == -1)
+			return -1;
+		return 1;
+	}
+	return 0;
+}
+
+/*
+ * The magic detection functions return:
+ *	 1: found
+ *	 0: not found
+ *	-1: error
+ */
+/*ARGSUSED*/
+protected int
+file_buffer(struct magic_set *ms, int fd, struct stat *st,
+    const char *inname __attribute__ ((__unused__)),
+    const void *buf, size_t nb)
+{
+	int m = 0, rv = 0, looks_text = 0;
+	const char *code = NULL;
+	const char *code_mime = "binary";
+	const char *def = "data";
+	const char *ftype = NULL;
+	char *rbuf = NULL;
+	struct buffer b;
+
+	buffer_init(&b, fd, st, buf, nb);
+	ms->mode = b.st.st_mode;
+
+	if (nb == 0) {
+		def = "empty";
+		goto simple;
+	} else if (nb == 1) {
+		def = "very short file (no magic)";
+		goto simple;
+	}
 
 	if ((ms->flags & MAGIC_NO_CHECK_ENCODING) == 0) {
-		looks_text = file_encoding(ms, ubuf, nb, &u8buf, &ulen,
-		    &code, &code_mime, &type);
+		looks_text = file_encoding(ms, &b, NULL, 0,
+		    &code, &code_mime, &ftype);
 	}
 
 #ifdef __EMX__
 	if ((ms->flags & MAGIC_NO_CHECK_APPTYPE) == 0 && inname) {
-		switch (file_os2_apptype(ms, inname, buf, nb)) {
+		m = file_os2_apptype(ms, inname, &b);
+		if ((ms->flags & MAGIC_DEBUG) != 0)
+			(void)fprintf(stderr, "[try os2_apptype %d]\n", m);
+		switch (m) {
 		case -1:
 			return -1;
 		case 0:
@@ -200,87 +250,113 @@ file_buffer(struct magic_set *ms, int fd, const char *inname, const void *buf,
 		}
 	}
 #endif
-
+#if HAVE_FORK
 	/* try compression stuff */
-	if ((ms->flags & MAGIC_NO_CHECK_COMPRESS) == 0)
-		if ((m = file_zmagic(ms, fd, inname, ubuf, nb)) != 0) {
-			if ((ms->flags & MAGIC_DEBUG) != 0)
-				(void)fprintf(stderr, "zmagic %d\n", m);
-			goto done;
+	if ((ms->flags & MAGIC_NO_CHECK_COMPRESS) == 0) {
+		m = file_zmagic(ms, &b, inname);
+		if ((ms->flags & MAGIC_DEBUG) != 0)
+			(void)fprintf(stderr, "[try zmagic %d]\n", m);
+		if (m) {
+			goto done_encoding;
 		}
-
+	}
+#endif
 	/* Check if we have a tar file */
-	if ((ms->flags & MAGIC_NO_CHECK_TAR) == 0)
-		if ((m = file_is_tar(ms, ubuf, nb)) != 0) {
-			if ((ms->flags & MAGIC_DEBUG) != 0)
-				(void)fprintf(stderr, "tar %d\n", m);
-			goto done;
-		}
-
-	/* Check if we have a CDF file */
-	if ((ms->flags & MAGIC_NO_CHECK_CDF) == 0)
-		if ((m = file_trycdf(ms, fd, ubuf, nb)) != 0) {
-			if ((ms->flags & MAGIC_DEBUG) != 0)
-				(void)fprintf(stderr, "cdf %d\n", m);
-			goto done;
-		}
-
-	/* try soft magic tests */
-	if ((ms->flags & MAGIC_NO_CHECK_SOFT) == 0)
-		if ((m = file_softmagic(ms, ubuf, nb, BINTEST)) != 0) {
-			if ((ms->flags & MAGIC_DEBUG) != 0)
-				(void)fprintf(stderr, "softmagic %d\n", m);
-#ifdef BUILTIN_ELF
-			if ((ms->flags & MAGIC_NO_CHECK_ELF) == 0 && m == 1 &&
-			    nb > 5 && fd != -1) {
-				/*
-				 * We matched something in the file, so this
-				 * *might* be an ELF file, and the file is at
-				 * least 5 bytes long, so if it's an ELF file
-				 * it has at least one byte past the ELF magic
-				 * number - try extracting information from the
-				 * ELF headers that cannot easily * be
-				 * extracted with rules in the magic file.
-				 */
-				if ((m = file_tryelf(ms, fd, ubuf, nb)) != 0)
-					if ((ms->flags & MAGIC_DEBUG) != 0)
-						(void)fprintf(stderr,
-						    "elf %d\n", m);
-			}
-#endif
-#ifdef BUILTIN_MACHO
-			file_trymacho(ms, fd, ubuf, nb, inname);
-#endif
-			goto done;
-		}
-
-	/* try text properties (and possibly text tokens) */
-	if ((ms->flags & MAGIC_NO_CHECK_TEXT) == 0) {
-
-		if ((m = file_ascmagic(ms, ubuf, nb)) != 0) {
-			if ((ms->flags & MAGIC_DEBUG) != 0)
-				(void)fprintf(stderr, "ascmagic %d\n", m);
-			goto done;
-		}
-
-		/* try to discover text encoding */
-		if ((ms->flags & MAGIC_NO_CHECK_ENCODING) == 0) {
-			if (looks_text == 0)
-				if ((m = file_ascmagic_with_encoding( ms, ubuf,
-				    nb, u8buf, ulen, code, type)) != 0) {
-					if ((ms->flags & MAGIC_DEBUG) != 0)
-						(void)fprintf(stderr,
-						    "ascmagic/enc %d\n", m);
-					goto done;
-				}
+	if ((ms->flags & MAGIC_NO_CHECK_TAR) == 0) {
+		m = file_is_tar(ms, &b);
+		if ((ms->flags & MAGIC_DEBUG) != 0)
+			(void)fprintf(stderr, "[try tar %d]\n", m);
+		if (m) {
+			if (checkdone(ms, &rv))
+				goto done;
 		}
 	}
 
+	/* Check if we have a JSON file */
+	if ((ms->flags & MAGIC_NO_CHECK_JSON) == 0) {
+		m = file_is_json(ms, &b);
+		if ((ms->flags & MAGIC_DEBUG) != 0)
+			(void)fprintf(stderr, "[try json %d]\n", m);
+		if (m) {
+			if (checkdone(ms, &rv))
+				goto done;
+		}
+	}
+
+	/* Check if we have a CDF file */
+	if ((ms->flags & MAGIC_NO_CHECK_CDF) == 0) {
+		m = file_trycdf(ms, &b);
+		if ((ms->flags & MAGIC_DEBUG) != 0)
+			(void)fprintf(stderr, "[try cdf %d]\n", m);
+		if (m) {
+			if (checkdone(ms, &rv))
+				goto done;
+		}
+	}
+#ifdef BUILTIN_ELF
+	if ((ms->flags & MAGIC_NO_CHECK_ELF) == 0 && nb > 5 && fd != -1) {
+		file_pushbuf_t *pb;
+		/*
+		 * We matched something in the file, so this
+		 * *might* be an ELF file, and the file is at
+		 * least 5 bytes long, so if it's an ELF file
+		 * it has at least one byte past the ELF magic
+		 * number - try extracting information from the
+		 * ELF headers that cannot easily be  extracted
+		 * with rules in the magic file. We we don't
+		 * print the information yet.
+		 */
+		if ((pb = file_push_buffer(ms)) == NULL)
+			return -1;
+
+		rv = file_tryelf(ms, &b);
+		rbuf = file_pop_buffer(ms, pb);
+		if (rv == -1) {
+			free(rbuf);
+			rbuf = NULL;
+		}
+		if ((ms->flags & MAGIC_DEBUG) != 0)
+			(void)fprintf(stderr, "[try elf %d]\n", m);
+	}
+#endif
+
+	/* try soft magic tests */
+	if ((ms->flags & MAGIC_NO_CHECK_SOFT) == 0) {
+		m = file_softmagic(ms, &b, NULL, NULL, BINTEST, looks_text);
+		if ((ms->flags & MAGIC_DEBUG) != 0)
+			(void)fprintf(stderr, "[try softmagic %d]\n", m);
+		if (m == 1 && rbuf) {
+			if (file_printf(ms, "%s", rbuf) == -1)
+				goto done;
+		}
+		if (m) {
+#ifdef BUILTIN_MACHO
+			file_trymacho(ms, &b, inname);
+#endif
+			if (checkdone(ms, &rv))
+				goto done;
+		}
+	}
+
+	/* try text properties */
+	if ((ms->flags & MAGIC_NO_CHECK_TEXT) == 0) {
+
+		m = file_ascmagic(ms, &b, looks_text);
+		if ((ms->flags & MAGIC_DEBUG) != 0)
+			(void)fprintf(stderr, "[try ascmagic %d]\n", m);
+		if (m) {
+			goto done;
+		}
+	}
+
+simple:
 	/* give up */
-	m = 1;
-	if ((!mime || (mime & MAGIC_MIME_TYPE)) &&
-	    file_printf(ms, mime ? "application/octet-stream" : "data") == -1) {
-	    rv = -1;
+	if (m == 0) {
+		m = 1;
+		rv = file_default(ms, nb);
+		if (rv == 0)
+			if (file_printf(ms, "%s", def) == -1)
+				rv = -1;
 	}
  done:
 	if ((ms->flags & MAGIC_MIME_ENCODING) != 0) {
@@ -290,8 +366,11 @@ file_buffer(struct magic_set *ms, int fd, const char *inname, const void *buf,
 		if (file_printf(ms, "%s", code_mime) == -1)
 			rv = -1;
 	}
-	if (u8buf)
-		free(u8buf);
+#if HAVE_FORK
+ done_encoding:
+#endif
+	free(rbuf);
+	buffer_fini(&b);
 	if (rv)
 		return rv;
 
@@ -300,9 +379,9 @@ file_buffer(struct magic_set *ms, int fd, const char *inname, const void *buf,
 #endif
 
 protected int
-file_reset(struct magic_set *ms)
+file_reset(struct magic_set *ms, int checkloaded)
 {
-	if (ms->mlist == NULL) {
+	if (checkloaded && ms->mlist[0] == NULL) {
 		file_error(ms, 0, "no magic files loaded");
 		return -1;
 	}
@@ -322,9 +401,9 @@ file_reset(struct magic_set *ms)
 #define OCTALIFY(n, o)	\
 	/*LINTED*/ \
 	(void)(*(n)++ = '\\', \
-	*(n)++ = (((uint32_t)*(o) >> 6) & 3) + '0', \
-	*(n)++ = (((uint32_t)*(o) >> 3) & 7) + '0', \
-	*(n)++ = (((uint32_t)*(o) >> 0) & 7) + '0', \
+	*(n)++ = ((CAST(uint32_t, *(o)) >> 6) & 3) + '0', \
+	*(n)++ = ((CAST(uint32_t, *(o)) >> 3) & 7) + '0', \
+	*(n)++ = ((CAST(uint32_t, *(o)) >> 0) & 7) + '0', \
 	(o)++)
 
 protected const char *
@@ -370,9 +449,9 @@ file_getbuffer(struct magic_set *ms)
 
 		while (op < eop) {
 			bytesconsumed = mbrtowc(&nextchar, op,
-			    (size_t)(eop - op), &state);
-			if (bytesconsumed == (size_t)(-1) ||
-			    bytesconsumed == (size_t)(-2)) {
+			    CAST(size_t, eop - op), &state);
+			if (bytesconsumed == CAST(size_t, -1) ||
+			    bytesconsumed == CAST(size_t, -2)) {
 				mb_conv = 0;
 				break;
 			}
@@ -394,9 +473,9 @@ file_getbuffer(struct magic_set *ms)
 	}
 #endif
 
-	for (np = ms->o.pbuf, op = ms->o.buf; *op; op++) {
-		if (isprint((unsigned char)*op) || ((unsigned char)*op) == '\t' || ((unsigned char)*op) == '\n') {
-			*np++ = *op;
+	for (np = ms->o.pbuf, op = ms->o.buf; *op;) {
+		if (isprint(CAST(unsigned char, *op)) || ((unsigned char)*op) == '\t' || ((unsigned char)*op) == '\n') {
+			*np++ = *op++;
 		} else {
 			OCTALIFY(np, op);
 		}
@@ -411,7 +490,7 @@ file_check_mem(struct magic_set *ms, unsigned int level)
 	size_t len;
 
 	if (level >= ms->c.len) {
-		len = (ms->c.len += 20) * sizeof(*ms->c.li);
+		len = (ms->c.len = 20 + level) * sizeof(*ms->c.li);
 		ms->c.li = CAST(struct level_info *, (ms->c.li == NULL) ?
 		    malloc(len) :
 		    realloc(ms->c.li, len));
@@ -426,4 +505,151 @@ file_check_mem(struct magic_set *ms, unsigned int level)
 	ms->c.li[level].last_cond = COND_NONE;
 #endif /* ENABLE_CONDITIONALS */
 	return 0;
+}
+
+protected size_t
+file_printedlen(const struct magic_set *ms)
+{
+	return ms->o.buf == NULL ? 0 : strlen(ms->o.buf);
+}
+
+protected int
+file_replace(struct magic_set *ms, const char *pat, const char *rep)
+{
+	file_regex_t rx;
+	int rc, rv = -1;
+
+	rc = file_regcomp(&rx, pat, REG_EXTENDED);
+	if (rc) {
+		file_regerror(&rx, rc, ms);
+	} else {
+		regmatch_t rm;
+		int nm = 0;
+		while (file_regexec(&rx, ms->o.buf, 1, &rm, 0) == 0) {
+			ms->o.buf[rm.rm_so] = '\0';
+			if (file_printf(ms, "%s%s", rep,
+			    rm.rm_eo != 0 ? ms->o.buf + rm.rm_eo : "") == -1)
+				goto out;
+			nm++;
+		}
+		rv = nm;
+	}
+out:
+	file_regfree(&rx);
+	return rv;
+}
+
+protected int
+file_regcomp(file_regex_t *rx, const char *pat, int flags)
+{
+#ifdef USE_C_LOCALE
+	rx->c_lc_ctype = newlocale(LC_CTYPE_MASK, "C", 0);
+	assert(rx->c_lc_ctype != NULL);
+	rx->old_lc_ctype = uselocale(rx->c_lc_ctype);
+	assert(rx->old_lc_ctype != NULL);
+#else
+	rx->old_lc_ctype = setlocale(LC_CTYPE, "C");
+#endif
+	rx->pat = pat;
+
+	return rx->rc = regcomp(&rx->rx, pat, flags);
+}
+
+protected int
+file_regexec(file_regex_t *rx, const char *str, size_t nmatch,
+    regmatch_t* pmatch, int eflags)
+{
+	assert(rx->rc == 0);
+	/* XXX: force initialization because glibc does not always do this */
+	memset(pmatch, 0, nmatch * sizeof(*pmatch));
+	return regexec(&rx->rx, str, nmatch, pmatch, eflags);
+}
+
+protected void
+file_regfree(file_regex_t *rx)
+{
+	if (rx->rc == 0)
+		regfree(&rx->rx);
+#ifdef USE_C_LOCALE
+	(void)uselocale(rx->old_lc_ctype);
+	freelocale(rx->c_lc_ctype);
+#else
+	(void)setlocale(LC_CTYPE, rx->old_lc_ctype);
+#endif
+}
+
+protected void
+file_regerror(file_regex_t *rx, int rc, struct magic_set *ms)
+{
+	char errmsg[512];
+
+	(void)regerror(rc, &rx->rx, errmsg, sizeof(errmsg));
+	file_magerror(ms, "regex error %d for `%s', (%s)", rc, rx->pat,
+	    errmsg);
+}
+
+protected file_pushbuf_t *
+file_push_buffer(struct magic_set *ms)
+{
+	file_pushbuf_t *pb;
+
+	if (ms->event_flags & EVENT_HAD_ERR)
+		return NULL;
+
+	if ((pb = (CAST(file_pushbuf_t *, malloc(sizeof(*pb))))) == NULL)
+		return NULL;
+
+	pb->buf = ms->o.buf;
+	pb->offset = ms->offset;
+
+	ms->o.buf = NULL;
+	ms->offset = 0;
+
+	return pb;
+}
+
+protected char *
+file_pop_buffer(struct magic_set *ms, file_pushbuf_t *pb)
+{
+	char *rbuf;
+
+	if (ms->event_flags & EVENT_HAD_ERR) {
+		free(pb->buf);
+		free(pb);
+		return NULL;
+	}
+
+	rbuf = ms->o.buf;
+
+	ms->o.buf = pb->buf;
+	ms->offset = pb->offset;
+
+	free(pb);
+	return rbuf;
+}
+
+/*
+ * convert string to ascii printable format.
+ */
+protected char *
+file_printable(char *buf, size_t bufsiz, const char *str, size_t slen)
+{
+	char *ptr, *eptr = buf + bufsiz - 1;
+	const unsigned char *s = RCAST(const unsigned char *, str);
+	const unsigned char *es = s + slen;
+
+	for (ptr = buf;  ptr < eptr && s < es && *s; s++) {
+		if (isprint(*s)) {
+			*ptr++ = *s;
+			continue;
+		}
+		if (ptr >= eptr - 3)
+			break;
+		*ptr++ = '\\';
+		*ptr++ = ((CAST(unsigned int, *s) >> 6) & 7) + '0';
+		*ptr++ = ((CAST(unsigned int, *s) >> 3) & 7) + '0';
+		*ptr++ = ((CAST(unsigned int, *s) >> 0) & 7) + '0';
+	}
+	*ptr = '\0';
+	return buf;
 }

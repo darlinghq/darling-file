@@ -25,10 +25,15 @@
  * SUCH DAMAGE.
  */
 
+#ifdef WIN32
+#include <windows.h>
+#include <shlwapi.h>
+#endif
+
 #include "file.h"
 
 #ifndef	lint
-FILE_RCSID("@(#)$File: magic.c,v 1.65 2009/09/14 17:50:38 christos Exp $")
+FILE_RCSID("@(#)$File: magic.c,v 1.111 2019/05/07 02:27:11 christos Exp $")
 #endif	/* lint */
 
 #include "magic.h"
@@ -39,9 +44,7 @@ FILE_RCSID("@(#)$File: magic.c,v 1.65 2009/09/14 17:50:38 christos Exp $")
 #ifdef QUICK
 #include <sys/mman.h>
 #endif
-#ifdef HAVE_LIMITS_H
 #include <limits.h>	/* for PIPE_BUF */
-#endif
 
 #if defined(HAVE_UTIMES)
 # include <sys/time.h>
@@ -56,8 +59,6 @@ FILE_RCSID("@(#)$File: magic.c,v 1.65 2009/09/14 17:50:38 christos Exp $")
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>	/* for read() */
 #endif
-
-#include "patchlevel.h"
 
 #ifdef __APPLE__
 #include "get_compat.h"
@@ -74,7 +75,6 @@ FILE_RCSID("@(#)$File: magic.c,v 1.65 2009/09/14 17:50:38 christos Exp $")
 #endif
 #endif
 
-private void free_mlist(struct mlist *);
 private void close_and_restore(const struct magic_set *, const char *, int,
     const struct stat *);
 private int unreadable_info(struct magic_set *, mode_t, const char *);
@@ -85,6 +85,94 @@ private const char *file_or_fd(struct magic_set *, const char *, int);
 
 #ifndef	STDIN_FILENO
 #define	STDIN_FILENO	0
+#endif
+
+#ifdef WIN32
+/* HINSTANCE of this shared library. Needed for get_default_magic() */
+static HINSTANCE _w32_dll_instance = NULL;
+
+static void
+_w32_append_path(char **hmagicpath, const char *fmt, ...)
+{
+	char *tmppath;
+        char *newpath;
+	va_list ap;
+
+	va_start(ap, fmt);
+	if (vasprintf(&tmppath, fmt, ap) < 0) {
+		va_end(ap);
+		return;
+	}
+	va_end(ap);
+
+	if (access(tmppath, R_OK) == -1)
+		goto out;
+
+	if (*hmagicpath == NULL) {
+		*hmagicpath = tmppath;
+		return;
+	}
+
+	if (asprintf(&newpath, "%s%c%s", *hmagicpath, PATHSEP, tmppath) < 0)
+		goto out;
+
+	free(*hmagicpath);
+	free(tmppath);
+	*hmagicpath = newpath;
+	return;
+out:
+	free(tmppath);
+}
+
+static void
+_w32_get_magic_relative_to(char **hmagicpath, HINSTANCE module)
+{
+	static const char *trypaths[] = {
+		"%s/share/misc/magic.mgc",
+		"%s/magic.mgc",
+	};
+	LPSTR dllpath;
+	size_t sp;
+
+	dllpath = calloc(MAX_PATH + 1, sizeof(*dllpath));
+
+	if (!GetModuleFileNameA(module, dllpath, MAX_PATH))
+		goto out;
+
+	PathRemoveFileSpecA(dllpath);
+
+	if (module) {
+		char exepath[MAX_PATH];
+		GetModuleFileNameA(NULL, exepath, MAX_PATH);
+		PathRemoveFileSpecA(exepath);
+		if (stricmp(exepath, dllpath) == 0)
+			goto out;
+	}
+
+	sp = strlen(dllpath);
+	if (sp > 3 && stricmp(&dllpath[sp - 3], "bin") == 0) {
+		_w32_append_path(hmagicpath,
+		    "%s/../share/misc/magic.mgc", dllpath);
+		goto out;
+	}
+
+	for (sp = 0; sp < __arraycount(trypaths); sp++)
+		_w32_append_path(hmagicpath, trypaths[sp], dllpath);
+out:
+	free(dllpath);
+}
+
+/* Placate GCC by offering a sacrificial previous prototype */
+BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID);
+
+BOOL WINAPI
+DllMain(HINSTANCE hinstDLL, DWORD fdwReason,
+    LPVOID lpvReserved __attribute__((__unused__)))
+{
+	if (fdwReason == DLL_PROCESS_ATTACH)
+		_w32_dll_instance = hinstDLL;
+	return 1;
+}
 #endif
 
 private const char *
@@ -109,68 +197,26 @@ magic_getpath(const char *magicfile, int action)
 public struct magic_set *
 magic_open(int flags)
 {
-	struct magic_set *ms;
-	size_t len;
-
-	if ((ms = CAST(struct magic_set *, calloc((size_t)1,
-	    sizeof(struct magic_set)))) == NULL)
-		return NULL;
-
-	if (magic_setflags(ms, flags) == -1) {
-		errno = EINVAL;
-		goto free;
-	}
-
-	ms->o.buf = ms->o.pbuf = NULL;
-	len = (ms->c.len = 10) * sizeof(*ms->c.li);
-
-	if ((ms->c.li = CAST(struct level_info *, malloc(len))) == NULL)
-		goto free;
-
-	ms->event_flags = 0;
-	ms->error = -1;
-	ms->mlist = NULL;
-	ms->file = "unknown";
-	ms->line = 0;
-	return ms;
-free:
-	free(ms);
-	return NULL;
-}
-
-private void
-free_mlist(struct mlist *mlist)
-{
-	struct mlist *ml;
-
-	if (mlist == NULL)
-		return;
-
-	for (ml = mlist->next; ml != mlist;) {
-		struct mlist *next = ml->next;
-		struct magic *mg = ml->magic;
-		file_delmagic(mg, ml->mapped, ml->nmagic);
-		free(ml);
-		ml = next;
-	}
-	free(ml);
+	return file_ms_alloc(flags);
 }
 
 private int
 unreadable_info(struct magic_set *ms, mode_t md, const char *file)
 {
-	/* We cannot open it, but we were able to stat it. */
 	if (COMPAT_MODE("bin/file", "unix2003")) {
 		if (file_printf(ms, "cannot open: %s", strerror(errno)) == -1)
 			return -1;
 		return 0;
 	}
-	if (access(file, W_OK) == 0)
-		if (file_printf(ms, "writable, ") == -1)
-			return -1;
-	if (access(file, X_OK) == 0)
-		if (file_printf(ms, "executable, ") == -1)
-			return -1;
+	if (file) {
+		/* We cannot open it, but we were able to stat it. */
+		if (access(file, W_OK) == 0)
+			if (file_printf(ms, "writable, ") == -1)
+				return -1;
+		if (access(file, X_OK) == 0)
+			if (file_printf(ms, "executable, ") == -1)
+				return -1;
+	}
 	if (S_ISREG(md))
 		if (file_printf(ms, "regular file, ") == -1)
 			return -1;
@@ -182,11 +228,9 @@ unreadable_info(struct magic_set *ms, mode_t md, const char *file)
 public void
 magic_close(struct magic_set *ms)
 {
-	free_mlist(ms->mlist);
-	free(ms->o.pbuf);
-	free(ms->o.buf);
-	free(ms->c.li);
-	free(ms);
+	if (ms == NULL)
+		return;
+	file_ms_free(ms);
 }
 
 /*
@@ -195,36 +239,55 @@ magic_close(struct magic_set *ms)
 public int
 magic_load(struct magic_set *ms, const char *magicfile)
 {
-	struct mlist *ml = file_apprentice(ms, magicfile, FILE_LOAD);
-	if (ml) {
-		free_mlist(ms->mlist);
-		ms->mlist = ml;
-		return 0;
-	}
-	return -1;
+	if (ms == NULL)
+		return -1;
+	return file_apprentice(ms, magicfile, FILE_LOAD);
 }
+
+#ifndef COMPILE_ONLY
+/*
+ * Install a set of compiled magic buffers.
+ */
+public int
+magic_load_buffers(struct magic_set *ms, void **bufs, size_t *sizes,
+    size_t nbufs)
+{
+	if (ms == NULL)
+		return -1;
+	return buffer_apprentice(ms, RCAST(struct magic **, bufs),
+	    sizes, nbufs);
+}
+#endif
 
 public int
 magic_compile(struct magic_set *ms, const char *magicfile)
 {
-	struct mlist *ml = file_apprentice(ms, magicfile, FILE_COMPILE);
-	free_mlist(ml);
-	return ml ? 0 : -1;
+	if (ms == NULL)
+		return -1;
+	return file_apprentice(ms, magicfile, FILE_COMPILE);
 }
 
 public int
 magic_check(struct magic_set *ms, const char *magicfile)
 {
-	struct mlist *ml = file_apprentice(ms, magicfile, FILE_CHECK);
-	free_mlist(ml);
-	return ml ? 0 : -1;
+	if (ms == NULL)
+		return -1;
+	return file_apprentice(ms, magicfile, FILE_CHECK);
+}
+
+public int
+magic_list(struct magic_set *ms, const char *magicfile)
+{
+	if (ms == NULL)
+		return -1;
+	return file_apprentice(ms, magicfile, FILE_LIST);
 }
 
 private void
 close_and_restore(const struct magic_set *ms, const char *name, int fd,
     const struct stat *sb)
 {
-	if (fd == STDIN_FILENO)
+	if (fd == STDIN_FILENO || name == NULL)
 		return;
 	(void) close(fd);
 
@@ -261,6 +324,8 @@ close_and_restore(const struct magic_set *ms, const char *name, int fd,
 public const char *
 magic_descriptor(struct magic_set *ms, int fd)
 {
+	if (ms == NULL)
+		return NULL;
 	return file_or_fd(ms, NULL, fd);
 }
 
@@ -270,6 +335,8 @@ magic_descriptor(struct magic_set *ms, int fd)
 public const char *
 magic_file(struct magic_set *ms, const char *inname)
 {
+	if (ms == NULL)
+		return NULL;
 	return file_or_fd(ms, inname, STDIN_FILENO);
 }
 
@@ -281,17 +348,19 @@ file_or_fd(struct magic_set *ms, const char *inname, int fd)
 	struct stat	sb;
 	ssize_t nbytes = 0;	/* number of bytes read from a datafile */
 	int	ispipe = 0;
+	int	okstat = 0;
+	off_t	pos = CAST(off_t, -1);
+
+	if (file_reset(ms, 1) == -1)
+		goto out;
 
 	/*
 	 * one extra for terminating '\0', and
 	 * some overlapping space for matches near EOF
 	 */
 #define SLOP (1 + sizeof(union VALUETYPE))
-	if ((buf = CAST(unsigned char *, malloc(HOWMANY + SLOP))) == NULL)
+	if ((buf = CAST(unsigned char *, malloc(ms->bytes_max + SLOP))) == NULL)
 		return NULL;
-
-	if (file_reset(ms) == -1)
-		goto done;
 
 	switch (file_fsmagic(ms, inname, &sb)) {
 	case -1:		/* error */
@@ -303,45 +372,62 @@ file_or_fd(struct magic_set *ms, const char *inname, int fd)
 		goto done;
 	}
 
-	if (inname == NULL) {
-		if (fstat(fd, &sb) == 0 && S_ISFIFO(sb.st_mode))
-			ispipe = 1;
-	} else {
-		int flags = O_RDONLY|O_BINARY;
-
-		if (stat(inname, &sb) == 0 && S_ISFIFO(sb.st_mode)) {
-			flags |= O_NONBLOCK;
-			ispipe = 1;
-		}
-
+#ifdef WIN32
+	/* Place stdin in binary mode, so EOF (Ctrl+Z) doesn't stop early. */
+	if (fd == STDIN_FILENO)
+		_setmode(STDIN_FILENO, O_BINARY);
+#endif
+	if (inname != NULL) {
+		int flags = O_RDONLY|O_BINARY|O_NONBLOCK;
 		errno = 0;
 		if ((fd = open(inname, flags)) < 0) {
-			if (unreadable_info(ms, sb.st_mode, inname) == -1)
+			okstat = stat(inname, &sb) == 0;
+			if (okstat && S_ISFIFO(sb.st_mode))
+				ispipe = 1;
+#ifdef WIN32
+			/*
+			 * Can't stat, can't open.  It may have been opened in
+			 * fsmagic, so if the user doesn't have read permission,
+			 * allow it to say so; otherwise an error was probably
+			 * displayed in fsmagic.
+			 */
+			if (!okstat && errno == EACCES) {
+				sb.st_mode = S_IFBLK;
+				okstat = 1;
+			}
+#endif
+			if (okstat &&
+			    unreadable_info(ms, sb.st_mode, inname) == -1)
 				goto done;
 			rv = 0;
 			goto done;
 		}
-#ifdef O_NONBLOCK
-		if ((flags = fcntl(fd, F_GETFL)) != -1) {
-			flags &= ~O_NONBLOCK;
-			(void)fcntl(fd, F_SETFL, flags);
-		}
-#endif
+	}
+
+	if (fd != -1) {
+		if (!okstat)
+			okstat = fstat(fd, &sb) == 0;
+		if (okstat && S_ISFIFO(sb.st_mode))
+			ispipe = 1;
+		if (inname == NULL)
+			pos = lseek(fd, CAST(off_t, 0), SEEK_CUR);
 	}
 
 	/*
-	 * try looking at the first HOWMANY bytes
+	 * try looking at the first ms->bytes_max bytes
 	 */
 	if (ispipe) {
-		ssize_t r = 0;
+		if (fd != -1) {
+			ssize_t r = 0;
 
-		while ((r = sread(fd, (void *)&buf[nbytes],
-		    (size_t)(HOWMANY - nbytes), 1)) > 0) {
-			nbytes += r;
-			if (r < PIPE_BUF) break;
+			while ((r = sread(fd, RCAST(void *, &buf[nbytes]),
+			    CAST(size_t, ms->bytes_max - nbytes), 1)) > 0) {
+				nbytes += r;
+				if (r < PIPE_BUF) break;
+			}
 		}
 
-		if (nbytes == 0) {
+		if (nbytes == 0 && inname) {
 			/* We can not read it, but we were able to stat it. */
 			if (unreadable_info(ms, sb.st_mode, inname) == -1)
 				goto done;
@@ -349,20 +435,35 @@ file_or_fd(struct magic_set *ms, const char *inname, int fd)
 			goto done;
 		}
 
-	} else {
-		if ((nbytes = read(fd, (char *)buf, HOWMANY)) == -1) {
-			file_error(ms, errno, "cannot read `%s'", inname);
+	} else if (fd != -1) {
+		/* Windows refuses to read from a big console buffer. */
+		size_t howmany =
+#if defined(WIN32)
+		    _isatty(fd) ? 8 * 1024 :
+#endif
+		    ms->bytes_max;
+		if ((nbytes = read(fd, RCAST(void *, buf), howmany)) == -1) {
+			if (inname == NULL && fd != STDIN_FILENO)
+				file_error(ms, errno, "cannot read fd %d", fd);
+			else
+				file_error(ms, errno, "cannot read `%s'",
+				    inname == NULL ? "/dev/stdin" : inname);
 			goto done;
 		}
 	}
 
 	(void)memset(buf + nbytes, 0, SLOP); /* NUL terminate */
-	if (file_buffer(ms, fd, inname, buf, (size_t)nbytes) == -1)
+	if (file_buffer(ms, fd, okstat ? &sb : NULL, inname, buf, CAST(size_t, nbytes)) == -1)
 		goto done;
 	rv = 0;
 done:
 	free(buf);
-	close_and_restore(ms, inname, fd, &sb);
+	if (fd != -1) {
+		if (pos != CAST(off_t, -1))
+			(void)lseek(fd, pos, SEEK_SET);
+		close_and_restore(ms, inname, fd, &sb);
+	}
+out:
 	return rv == 0 ? file_getbuffer(ms) : NULL;
 }
 
@@ -370,13 +471,15 @@ done:
 public const char *
 magic_buffer(struct magic_set *ms, const void *buf, size_t nb)
 {
-	if (file_reset(ms) == -1)
+	if (ms == NULL)
+		return NULL;
+	if (file_reset(ms, 1) == -1)
 		return NULL;
 	/*
 	 * The main work is done here!
 	 * We have the file name and/or the data buffer to be identified.
 	 */
-	if (file_buffer(ms, -1, NULL, buf, nb) == -1) {
+	if (file_buffer(ms, -1, NULL, NULL, buf, nb) == -1) {
 		return NULL;
 	}
 	return file_getbuffer(ms);
@@ -386,22 +489,109 @@ magic_buffer(struct magic_set *ms, const void *buf, size_t nb)
 public const char *
 magic_error(struct magic_set *ms)
 {
+	if (ms == NULL)
+		return "Magic database is not open";
 	return (ms->event_flags & EVENT_HAD_ERR) ? ms->o.buf : NULL;
 }
 
 public int
 magic_errno(struct magic_set *ms)
 {
+	if (ms == NULL)
+		return EINVAL;
 	return (ms->event_flags & EVENT_HAD_ERR) ? ms->error : 0;
+}
+
+public int
+magic_getflags(struct magic_set *ms)
+{
+	if (ms == NULL)
+		return -1;
+
+	return ms->flags;
 }
 
 public int
 magic_setflags(struct magic_set *ms, int flags)
 {
+	if (ms == NULL)
+		return -1;
 #if !defined(HAVE_UTIME) && !defined(HAVE_UTIMES)
 	if (flags & MAGIC_PRESERVE_ATIME)
 		return -1;
 #endif
 	ms->flags = flags;
 	return 0;
+}
+
+public int
+magic_version(void)
+{
+	return MAGIC_VERSION;
+}
+
+public int
+magic_setparam(struct magic_set *ms, int param, const void *val)
+{
+	if (ms == NULL)
+		return -1;
+	switch (param) {
+	case MAGIC_PARAM_INDIR_MAX:
+		ms->indir_max = CAST(uint16_t, *CAST(const size_t *, val));
+		return 0;
+	case MAGIC_PARAM_NAME_MAX:
+		ms->name_max = CAST(uint16_t, *CAST(const size_t *, val));
+		return 0;
+	case MAGIC_PARAM_ELF_PHNUM_MAX:
+		ms->elf_phnum_max = CAST(uint16_t, *CAST(const size_t *, val));
+		return 0;
+	case MAGIC_PARAM_ELF_SHNUM_MAX:
+		ms->elf_shnum_max = CAST(uint16_t, *CAST(const size_t *, val));
+		return 0;
+	case MAGIC_PARAM_ELF_NOTES_MAX:
+		ms->elf_notes_max = CAST(uint16_t, *CAST(const size_t *, val));
+		return 0;
+	case MAGIC_PARAM_REGEX_MAX:
+		ms->regex_max = CAST(uint16_t, *CAST(const size_t *, val));
+		return 0;
+	case MAGIC_PARAM_BYTES_MAX:
+		ms->bytes_max = *CAST(const size_t *, val);
+		return 0;
+	default:
+		errno = EINVAL;
+		return -1;
+	}
+}
+
+public int
+magic_getparam(struct magic_set *ms, int param, void *val)
+{
+	if (ms == NULL)
+		return -1;
+	switch (param) {
+	case MAGIC_PARAM_INDIR_MAX:
+		*CAST(size_t *, val) = ms->indir_max;
+		return 0;
+	case MAGIC_PARAM_NAME_MAX:
+		*CAST(size_t *, val) = ms->name_max;
+		return 0;
+	case MAGIC_PARAM_ELF_PHNUM_MAX:
+		*CAST(size_t *, val) = ms->elf_phnum_max;
+		return 0;
+	case MAGIC_PARAM_ELF_SHNUM_MAX:
+		*CAST(size_t *, val) = ms->elf_shnum_max;
+		return 0;
+	case MAGIC_PARAM_ELF_NOTES_MAX:
+		*CAST(size_t *, val) = ms->elf_notes_max;
+		return 0;
+	case MAGIC_PARAM_REGEX_MAX:
+		*CAST(size_t *, val) = ms->regex_max;
+		return 0;
+	case MAGIC_PARAM_BYTES_MAX:
+		*CAST(size_t *, val) = ms->bytes_max;
+		return 0;
+	default:
+		errno = EINVAL;
+		return -1;
+	}
 }

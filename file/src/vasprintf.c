@@ -2,7 +2,7 @@
  * Copyright (c) Ian F. Darwin 1986-1995.
  * Software written by Ian F. Darwin and others;
  * maintained 1995-present by Christos Zoulas and others.
- * 
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
@@ -12,7 +12,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- *  
+ *
  * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
@@ -51,7 +51,7 @@ form must reproduce the above copyright notice, this list of conditions and
 the following disclaimer in the documentation and/or other materials
 provided with the distribution. The name of the author may not be used to
 endorse or promote products derived from this software without specific
-prior written permission. 
+prior written permission.
 
 THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
 WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
@@ -83,12 +83,12 @@ trying to do any interpretation
 flag:   none   +     -     #     (blank)
 width:  n    0n    *
 prec:   none   .0    .n     .*
-modifier:    F N L h l ll    ('F' and 'N' are ms-dos/16-bit specific)
+modifier:    F N L h l ll z t    ('F' and 'N' are ms-dos/16-bit specific)
 type:  d i o u x X f e g E G c s p n
 
 
 The function needs to allocate memory to store the full text before to
-actually writting it.  i.e if you want to fnprintf() 1000 characters, the
+actually writing it.  i.e if you want to fnprintf() 1000 characters, the
 functions will allocate 1000 bytes.
 This behaviour can be modified: you have to customise the code to flush the
 internal buffer (writing to screen or file) when it reach a given size. Then
@@ -108,7 +108,7 @@ you use strange formats.
 #include "file.h"
 
 #ifndef	lint
-FILE_RCSID("@(#)$File: vasprintf.c,v 1.7 2009/02/03 20:27:52 christos Exp $")
+FILE_RCSID("@(#)$File: vasprintf.c,v 1.16 2018/10/01 18:45:39 christos Exp $")
 #endif	/* lint */
 
 #include <assert.h>
@@ -116,9 +116,8 @@ FILE_RCSID("@(#)$File: vasprintf.c,v 1.7 2009/02/03 20:27:52 christos Exp $")
 #include <stdlib.h>
 #include <stdarg.h>
 #include <ctype.h>
-#ifdef HAVE_LIMITS_H
 #include <limits.h>
-#endif
+#include <stddef.h>
 
 #define ALLOC_CHUNK 2048
 #define ALLOC_SECURITY_MARGIN 1024   /* big value because some platforms have very big 'G' exponent */
@@ -385,7 +384,12 @@ static int dispatch(xprintf_struct *s)
     prec = -1;                  /* no .prec specified */
 
   /* modifier */
-  if (*SRCTXT == 'L' || *SRCTXT == 'h' || *SRCTXT == 'l') {
+  switch (*SRCTXT) {
+  case 'L':
+  case 'h':
+  case 'l':
+  case 'z':
+  case 't':
     modifier = *SRCTXT;
     SRCTXT++;
     if (modifier=='l' && *SRCTXT=='l') {
@@ -393,8 +397,11 @@ static int dispatch(xprintf_struct *s)
       modifier = 'L';  /* 'll' == 'L'      long long == long double */
     } /* only for compatibility ; not portable */
     INCOHERENT_TEST();
-  } else
+    break;
+  default:
     modifier = -1;              /* no modifier specified */
+    break;
+  }
 
   /* type */
   type = *SRCTXT;
@@ -477,6 +484,10 @@ static int dispatch(xprintf_struct *s)
       return print_it(s, (size_t)approx_width, format_string, va_arg(s->vargs, long int));
     case 'h':
       return print_it(s, (size_t)approx_width, format_string, va_arg(s->vargs, int));
+    case 'z':
+      return print_it(s, (size_t)approx_width, format_string, va_arg(s->vargs, size_t));
+    case 't':
+      return print_it(s, (size_t)approx_width, format_string, va_arg(s->vargs, ptrdiff_t));
       /* 'int' instead of 'short int' because default promotion is 'int' */
     default:
       INCOHERENT();
@@ -544,7 +555,7 @@ static int dispatch(xprintf_struct *s)
  */
 static int core(xprintf_struct *s)
 {
-  size_t len, save_len;
+  size_t save_len;
   char *dummy_base;
 
   /* basic checks */
@@ -569,8 +580,7 @@ static int core(xprintf_struct *s)
   for (;;) {
     /* up to end of source string */
     if (*(s->src_string) == 0) {
-      *(s->dest_string) = 0;    /* final 0 */
-      len = s->real_len + 1;
+      *(s->dest_string) = '\0';    /* final NUL */
       break;
     }
 
@@ -579,15 +589,13 @@ static int core(xprintf_struct *s)
 
     /* up to end of dest string */
     if (s->real_len >= s->maxlen) {
-      (s->buffer_base)[s->maxlen] = 0; /* final 0 */
-      len = s->maxlen + 1;
+      (s->buffer_base)[s->maxlen] = '\0'; /* final NUL */
       break;
     }
   }
 
   /* for (v)asnprintf */
   dummy_base = s->buffer_base;
-  save_len = 0;                 /* just to avoid a compiler warning */
 
   dummy_base = s->buffer_base + s->real_len;
   save_len = s->real_len;
@@ -608,8 +616,7 @@ static int core(xprintf_struct *s)
   return s->pseudo_len;
 
  free_EOF:
-  if (s->buffer_base != NULL)
-    free(s->buffer_base);
+  free(s->buffer_base);
   return EOF;
 }
 
@@ -622,11 +629,15 @@ int vasprintf(char **ptr, const char *format_string, va_list vargs)
 #ifdef va_copy
   va_copy (s.vargs, vargs);
 #else
-#ifdef __va_copy
+# ifdef __va_copy
   __va_copy (s.vargs, vargs);
-#else
-  memcpy (&s.vargs, vargs, sizeof (va_list));
-#endif /* __va_copy */
+# else
+#  ifdef WIN32
+  s.vargs = vargs;
+#  else
+  memcpy (&s.vargs, &vargs, sizeof (s.va_args));
+#  endif /* WIN32 */
+# endif /* __va_copy */
 #endif /* va_copy */
   s.maxlen = (size_t)INT_MAX;
 

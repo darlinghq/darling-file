@@ -1,10 +1,12 @@
 
 #------------------------------------------------------------------------
-# $File: sysex,v 1.6 2009/09/19 16:28:12 christos Exp $
+# $File: sysex,v 1.10 2019/04/19 00:42:27 christos Exp $
 # sysex: file(1) magic for MIDI sysex files
 #
-# 
-0	byte			0xF0		SysEx File -
+# GRR: original 1 byte test at offset was too general as it catches also many FATs of DOS filesystems
+# where real SYStem EXclusive messages at offset 1 are limited to seven bits
+# https://en.wikipedia.org/wiki/MIDI
+0	ubeshort&0xFF80		0xF000		SysEx File -
 
 # North American Group
 >1	byte			0x01		Sequential
@@ -210,7 +212,7 @@
 >1	byte			0x52		Zoom
 >1	byte			0x54		Matsushita
 >1	byte			0x57		Acoustic tech. lab.
-
+# https://www.midi.org/techspecs/manid.php
 >1	belong&0xffffff00	0x00007400	Ta Horng
 >1	belong&0xffffff00	0x00007500	e-Tek
 >1	belong&0xffffff00	0x00007600	E-Voice
@@ -254,7 +256,7 @@
 >1	belong&0xffffff00	0x00011d00	Nemesys
 >1	belong&0xffffff00	0x00011e00	DBX
 >1	belong&0xffffff00	0x00011f00	Syndyne
->1	belong&0xffffff00	0x00012000	Bitheadz	
+>1	belong&0xffffff00	0x00012000	Bitheadz
 >1	belong&0xffffff00	0x00012100	Cakewalk
 >1	belong&0xffffff00	0x00012200	Staccato
 >1	belong&0xffffff00	0x00012300	National Semicon.

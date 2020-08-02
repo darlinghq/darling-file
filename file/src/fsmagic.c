@@ -2,7 +2,7 @@
  * Copyright (c) Ian F. Darwin 1986-1995.
  * Software written by Ian F. Darwin and others;
  * maintained 1995-present by Christos Zoulas and others.
- * 
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
@@ -12,7 +12,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- *  
+ *
  * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
@@ -32,7 +32,7 @@
 #include "file.h"
 
 #ifndef	lint
-FILE_RCSID("@(#)$File: fsmagic.c,v 1.60 2009/05/08 17:41:59 christos Exp $")
+FILE_RCSID("@(#)$File: fsmagic.c,v 1.80 2019/04/23 18:59:27 christos Exp $")
 #endif	/* lint */
 
 #include "magic.h"
@@ -46,49 +46,52 @@ FILE_RCSID("@(#)$File: fsmagic.c,v 1.60 2009/05/08 17:41:59 christos Exp $")
 # include <sys/mkdev.h>
 # define HAVE_MAJOR
 #endif
-#ifdef MAJOR_IN_SYSMACROS
+#ifdef HAVE_SYS_SYSMACROS_H
 # include <sys/sysmacros.h>
+#endif
+#ifdef MAJOR_IN_SYSMACROS
 # define HAVE_MAJOR
 #endif
-#ifdef major			/* Might be defined in sys/types.h.  */
+#if defined(major) && !defined(HAVE_MAJOR)
+/* Might be defined in sys/types.h.  */
 # define HAVE_MAJOR
 #endif
-  
+#ifdef WIN32
+# define WIN32_LEAN_AND_MEAN
+# include <windows.h>
+#endif
+
 #ifndef HAVE_MAJOR
 # define major(dev)  (((dev) >> 8) & 0xff)
 # define minor(dev)  ((dev) & 0xff)
 #endif
 #undef HAVE_MAJOR
-
+#ifdef	S_IFLNK
 private int
 bad_link(struct magic_set *ms, int err, char *buf)
 {
-	const char *errfmt;
 	int mime = ms->flags & MAGIC_MIME;
 	if ((mime & MAGIC_MIME_TYPE) &&
-	    file_printf(ms, "application/x-symlink")
+	    file_printf(ms, "inode/symlink")
 	    == -1)
 		return -1;
 	else if (!mime) {
-		if (err == ELOOP)
-			errfmt = "symbolic link in a loop";
-		else
-			errfmt = "broken symbolic link to %s";
 		if (ms->flags & MAGIC_ERROR) {
-			file_error(ms, err, errfmt, buf);
+			file_error(ms, err,
+				   "broken symbolic link to %s", buf);
 			return -1;
-		} 
-		if (file_printf(ms, errfmt, buf) == -1)
+		}
+		if (file_printf(ms, "broken symbolic link to %s", buf) == -1)
 			return -1;
 	}
 	return 1;
 }
-
+#endif
 private int
 handle_mime(struct magic_set *ms, int mime, const char *str)
 {
 	if ((mime & MAGIC_MIME_TYPE)) {
-		if (file_printf(ms, "application/%s", str) == -1)
+		if (file_printf(ms, "inode/%s", str) == -1)
 			return -1;
 		if ((mime & MAGIC_MIME_ENCODING) && file_printf(ms,
 		    "; charset=") == -1)
@@ -102,19 +105,19 @@ handle_mime(struct magic_set *ms, int mime, const char *str)
 protected int
 file_fsmagic(struct magic_set *ms, const char *fn, struct stat *sb)
 {
-	int ret = 0;
+	int ret, did = 0;
 	int mime = ms->flags & MAGIC_MIME;
+	int silent = ms->flags & (MAGIC_APPLE|MAGIC_EXTENSION);
 #ifdef	S_IFLNK
 	char buf[BUFSIZ+4];
 	ssize_t nch;
 	struct stat tstatbuf;
 #endif
 
-	if (ms->flags & MAGIC_APPLE)
-		return 0;
 	if (fn == NULL)
 		return 0;
 
+#define COMMA	(did++ ? ", " : "")
 	/*
 	 * Fstat is cheaper but fails for files you don't have read perms on.
 	 * On 4.2BSD and similar systems, use lstat() to identify symlinks.
@@ -125,6 +128,35 @@ file_fsmagic(struct magic_set *ms, const char *fn, struct stat *sb)
 	else
 #endif
 	ret = stat(fn, sb);	/* don't merge into if; see "ret =" above */
+
+#ifdef WIN32
+	{
+		HANDLE hFile = CreateFile((LPCSTR)fn, 0, FILE_SHARE_DELETE |
+		    FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0,
+		    NULL);
+		if (hFile != INVALID_HANDLE_VALUE) {
+			/*
+			 * Stat failed, but we can still open it - assume it's
+			 * a block device, if nothing else.
+			 */
+			if (ret) {
+				sb->st_mode = S_IFBLK;
+				ret = 0;
+			}
+			switch (GetFileType(hFile)) {
+			case FILE_TYPE_CHAR:
+				sb->st_mode |= S_IFCHR;
+				sb->st_mode &= ~S_IFREG;
+				break;
+			case FILE_TYPE_PIPE:
+				sb->st_mode |= S_IFIFO;
+				sb->st_mode &= ~S_IFREG;
+				break;
+			}
+			CloseHandle(hFile);
+		}
+	}
+#endif
 
 #ifdef	S_IFLNK
 	/* POSIX says pretend symlinks to nonexistant files
@@ -142,97 +174,106 @@ file_fsmagic(struct magic_set *ms, const char *fn, struct stat *sb)
 		if (file_printf(ms, "cannot open `%s' (%s)",
 		    fn, strerror(errno)) == -1)
 			return -1;
-		return 1;
+		return 0;
 	}
 
-	if (!mime) {
+	ret = 1;
+	if (!mime && !silent) {
 #ifdef S_ISUID
-		if (sb->st_mode & S_ISUID) 
-			if (file_printf(ms, "setuid ") == -1)
+		if (sb->st_mode & S_ISUID)
+			if (file_printf(ms, "%ssetuid", COMMA) == -1)
 				return -1;
 #endif
 #ifdef S_ISGID
-		if (sb->st_mode & S_ISGID) 
-			if (file_printf(ms, "setgid ") == -1)
+		if (sb->st_mode & S_ISGID)
+			if (file_printf(ms, "%ssetgid", COMMA) == -1)
 				return -1;
 #endif
 #ifdef S_ISVTX
-		if (sb->st_mode & S_ISVTX) 
-			if (file_printf(ms, "sticky ") == -1)
+		if (sb->st_mode & S_ISVTX)
+			if (file_printf(ms, "%ssticky", COMMA) == -1)
 				return -1;
 #endif
 	}
-	
+
 	switch (sb->st_mode & S_IFMT) {
 	case S_IFDIR:
 		if (mime) {
-			if (handle_mime(ms, mime, "x-directory") == -1)
+			if (handle_mime(ms, mime, "directory") == -1)
 				return -1;
-		} else if (file_printf(ms, "directory") == -1)
+		} else if (silent) {
+		} else if (file_printf(ms, "%sdirectory", COMMA) == -1)
 			return -1;
-		return 1;
+		break;
 #ifdef S_IFCHR
 	case S_IFCHR:
-		/* 
+		/*
 		 * If -s has been specified, treat character special files
 		 * like ordinary files.  Otherwise, just report that they
 		 * are block special files and go on to the next file.
 		 */
-		if ((ms->flags & MAGIC_DEVICES) != 0)
+		if ((ms->flags & MAGIC_DEVICES) != 0) {
+			ret = 0;
 			break;
+		}
 		if (mime) {
-			if (handle_mime(ms, mime, "x-character-device") == -1)
+			if (handle_mime(ms, mime, "chardevice") == -1)
 				return -1;
+		} else if (silent) {
 		} else {
-#ifdef HAVE_STAT_ST_RDEV
+#ifdef HAVE_STRUCT_STAT_ST_RDEV
 # ifdef dv_unit
-			if (file_printf(ms, "character special (%d/%d/%d)",
-			    major(sb->st_rdev), dv_unit(sb->st_rdev),
+			if (file_printf(ms, "%scharacter special (%d/%d/%d)",
+			    COMMA, major(sb->st_rdev), dv_unit(sb->st_rdev),
 					dv_subunit(sb->st_rdev)) == -1)
 				return -1;
 # else
-			if (file_printf(ms, "character special (%ld/%ld)",
-			    (long)major(sb->st_rdev), (long)minor(sb->st_rdev))
-			    == -1)
+			if (file_printf(ms, "%scharacter special (%ld/%ld)",
+			    COMMA, (long)major(sb->st_rdev),
+			    (long)minor(sb->st_rdev)) == -1)
 				return -1;
 # endif
 #else
-			if (file_printf(ms, "character special") == -1)
+			if (file_printf(ms, "%scharacter special", COMMA) == -1)
 				return -1;
 #endif
 		}
-		return 1;
+		break;
 #endif
 #ifdef S_IFBLK
 	case S_IFBLK:
-		/* 
+		/*
 		 * If -s has been specified, treat block special files
 		 * like ordinary files.  Otherwise, just report that they
 		 * are block special files and go on to the next file.
 		 */
-		if ((ms->flags & MAGIC_DEVICES) != 0)
+		if ((ms->flags & MAGIC_DEVICES) != 0) {
+			ret = 0;
 			break;
+		}
 		if (mime) {
-			if (handle_mime(ms, mime, "x-block-device") == -1)
+			if (handle_mime(ms, mime, "blockdevice") == -1)
 				return -1;
+		} else if (silent) {
 		} else {
-#ifdef HAVE_STAT_ST_RDEV
+#ifdef HAVE_STRUCT_STAT_ST_RDEV
 # ifdef dv_unit
-			if (file_printf(ms, "block special (%d/%d/%d)",
-					major(sb->st_rdev), dv_unit(sb->st_rdev),
-					dv_subunit(sb->st_rdev)) == -1)
+			if (file_printf(ms, "%sblock special (%d/%d/%d)",
+			    COMMA, major(sb->st_rdev), dv_unit(sb->st_rdev),
+			    dv_subunit(sb->st_rdev)) == -1)
 				return -1;
 # else
-			if (file_printf(ms, "block special (%ld/%ld)",
-					(long)major(sb->st_rdev), (long)minor(sb->st_rdev)) == -1)
+			if (file_printf(ms, "%sblock special (%ld/%ld)",
+			    COMMA, (long)major(sb->st_rdev),
+			    (long)minor(sb->st_rdev)) == -1)
 				return -1;
 # endif
 #else
-			if (file_printf(ms, "block special") == -1)
+			if (file_printf(ms, "%sblock special", COMMA) == -1)
 				return -1;
 #endif
 		}
-		return 1;
+		break;
 #endif
 	/* TODO add code to handle V7 MUX and Blit MUX files */
 #ifdef	S_IFIFO
@@ -240,20 +281,22 @@ file_fsmagic(struct magic_set *ms, const char *fn, struct stat *sb)
 		if((ms->flags & MAGIC_DEVICES) != 0)
 			break;
 		if (mime) {
-			if (handle_mime(ms, mime, "x-fifo") == -1)
+			if (handle_mime(ms, mime, "fifo") == -1)
 				return -1;
-		} else if (file_printf(ms, "fifo (named pipe)") == -1)
+		} else if (silent) {
+		} else if (file_printf(ms, "%sfifo (named pipe)", COMMA) == -1)
 			return -1;
-		return 1;
+		break;
 #endif
 #ifdef	S_IFDOOR
 	case S_IFDOOR:
 		if (mime) {
-			if (handle_mime(ms, mime, "x-door") == -1)
+			if (handle_mime(ms, mime, "door") == -1)
 				return -1;
-		} else if (file_printf(ms, "door") == -1)
+		} else if (silent) {
+		} else if (file_printf(ms, "%sdoor", COMMA) == -1)
 			return -1;
-		return 1;
+		break;
 #endif
 #ifdef	S_IFLNK
 	case S_IFLNK:
@@ -264,17 +307,27 @@ file_fsmagic(struct magic_set *ms, const char *fn, struct stat *sb)
 			    return -1;
 			}
 			if (mime) {
-				if (handle_mime(ms, mime, "x-symlink") == -1)
+				if (handle_mime(ms, mime, "symlink") == -1)
 					return -1;
+			} else if (silent) {
 			} else if (file_printf(ms,
-			    "unreadable symlink `%s' (%s)", fn,
+			    "%sunreadable symlink `%s' (%s)", COMMA, fn,
 			    strerror(errno)) == -1)
 				return -1;
-			return 1;
+			break;
 		}
 		buf[nch] = '\0';	/* readlink(2) does not do this */
 
 		/* If broken symlink, say so and quit early. */
+#ifdef __linux__
+		/*
+		 * linux procfs/devfs makes symlinks like pipe:[3515864880]
+		 * that we can't stat their readlink output, so stat the
+		 * original filename instead.
+		 */
+		if (stat(fn, &tstatbuf) < 0)
+			return bad_link(ms, errno, buf);
+#else
 		if (*buf == '/') {
 			if (stat(buf, &tstatbuf) < 0)
 				return bad_link(ms, errno, buf);
@@ -287,7 +340,7 @@ file_fsmagic(struct magic_set *ms, const char *fn, struct stat *sb)
 			} else {
 				if (tmp - fn + 1 > BUFSIZ) {
 					if (ms->flags & MAGIC_ERROR) {
-						file_error(ms, 0, 
+						file_error(ms, 0,
 						    "path too long: `%s'", buf);
 						return -1;
 					}
@@ -295,10 +348,12 @@ file_fsmagic(struct magic_set *ms, const char *fn, struct stat *sb)
 						if (handle_mime(ms, mime,
 						    "x-path-too-long") == -1)
 							return -1;
+					} else if (silent) {
 					} else if (file_printf(ms,
-					    "path too long: `%s'", fn) == -1)
+					    "%spath too long: `%s'", COMMA,
+					    fn) == -1)
 						return -1;
-					return 1;
+					break;
 				}
 				/* take dir part */
 				(void)strlcpy(buf2, fn, sizeof buf2);
@@ -310,6 +365,7 @@ file_fsmagic(struct magic_set *ms, const char *fn, struct stat *sb)
 			if (stat(tmp, &tstatbuf) < 0)
 				return bad_link(ms, errno, buf);
 		}
+#endif
 
 		/* Otherwise, handle it. */
 		if ((ms->flags & MAGIC_SYMLINK) != 0) {
@@ -317,26 +373,29 @@ file_fsmagic(struct magic_set *ms, const char *fn, struct stat *sb)
 			ms->flags &= MAGIC_SYMLINK;
 			p = magic_file(ms, buf);
 			ms->flags |= MAGIC_SYMLINK;
-			return p != NULL ? 1 : -1;
+			if (p == NULL)
+				return -1;
 		} else { /* just print what it points to */
 			if (mime) {
-				if (handle_mime(ms, mime, "x-symlink") == -1)
+				if (handle_mime(ms, mime, "symlink") == -1)
 					return -1;
-			} else if (file_printf(ms, "symbolic link to %s",
-			    buf) == -1)
+			} else if (silent) {
+			} else if (file_printf(ms, "%ssymbolic link to %s",
+			    COMMA, buf) == -1)
 				return -1;
 		}
-		return 1;
+		break;
 #endif
 #ifdef	S_IFSOCK
 #ifndef __COHERENT__
 	case S_IFSOCK:
 		if (mime) {
-			if (handle_mime(ms, mime, "x-socket") == -1)
+			if (handle_mime(ms, mime, "socket") == -1)
 				return -1;
-		} else if (file_printf(ms, "socket") == -1)
+		} else if (silent) {
+		} else if (file_printf(ms, "%ssocket", COMMA) == -1)
 			return -1;
-		return 1;
+		break;
 #endif
 #endif
 	case S_IFREG:
@@ -345,32 +404,39 @@ file_fsmagic(struct magic_set *ms, const char *fn, struct stat *sb)
 				return -1;
 			return 1;
 		}
+		/*
+		 * regular file, check next possibility
+		 *
+		 * If stat() tells us the file has zero length, report here that
+		 * the file is empty, so we can skip all the work of opening and
+		 * reading the file.
+		 * But if the -s option has been given, we skip this
+		 * optimization, since on some systems, stat() reports zero
+		 * size for raw disk partitions. (If the block special device
+		 * really has zero length, the fact that it is empty will be
+		 * detected and reported correctly when we read the file.)
+		 */
+		if ((ms->flags & MAGIC_DEVICES) == 0 && sb->st_size == 0) {
+			if (mime) {
+				if (handle_mime(ms, mime, "x-empty") == -1)
+					return -1;
+			} else if (silent) {
+			} else if (file_printf(ms, "%sempty", COMMA) == -1)
+				return -1;
+			break;
+		}
+		ret = 0;
 		break;
+
 	default:
 		file_error(ms, 0, "invalid mode 0%o", sb->st_mode);
 		return -1;
 		/*NOTREACHED*/
 	}
 
-	/*
-	 * regular file, check next possibility
-	 *
-	 * If stat() tells us the file has zero length, report here that
-	 * the file is empty, so we can skip all the work of opening and 
-	 * reading the file.
-	 * But if the -s option has been given, we skip this optimization,
-	 * since on some systems, stat() reports zero size for raw disk
-	 * partitions.  (If the block special device really has zero length,
-	 * the fact that it is empty will be detected and reported correctly
-	 * when we read the file.)
-	 */
-	if ((ms->flags & MAGIC_DEVICES) == 0 && sb->st_size == 0) {
-		if (mime) {
-			if (handle_mime(ms, mime, "x-empty") == -1)
-				return -1;
-		} else if (file_printf(ms, "empty") == -1)
-			return -1;
-		return 1;
+	if (!silent && !mime && did && ret == 0) {
+	    if (file_printf(ms, " ") == -1)
+		    return -1;
 	}
-	return 0;
+	return ret;
 }

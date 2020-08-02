@@ -1,19 +1,19 @@
 
 #------------------------------------------------------------------------------
-# $File: games,v 1.8 2009/09/19 16:28:09 christos Exp $
+# $File: games,v 1.17 2019/04/19 00:42:27 christos Exp $
 # games:  file(1) for games
 
 # Fabio Bonelli <fabiobonelli@libero.it>
 # Quake II - III data files
 0       string  IDP2        	Quake II 3D Model file,
->20     long    x               %lu skin(s),
->8      long    x               (%lu x
->12     long    x 		%lu),
->40     long    x               %lu frame(s),
->16     long    x               Frame size %lu bytes,
->24     long  	x               %lu vertices/frame,
->28     long    x            	%lu texture coordinates,
->32     long    x               %lu triangles/frame
+>20     long    x               %u skin(s),
+>8      long    x               (%u x
+>12     long    x 		%u),
+>40     long    x               %u frame(s),
+>16     long    x               Frame size %u bytes,
+>24     long  	x               %u vertices/frame,
+>28     long    x            	%u texture coordinates,
+>32     long    x               %u triangles/frame
 
 0       string  IBSP            Quake
 >4      long    0x26            II Map file (BSP)
@@ -34,11 +34,48 @@
 
 # Quake
 
-0       string  PACK    Quake I or II world or extension
+# Update: Joerg Jenderek
+# URL: http://fileformats.archiveteam.org/wiki/PAK
+# reference: https://quakewiki.org/wiki/.pak
+# GRR: line below is too general as it matches also Acorn PackDir compressed Archive
+# and Git pack ./revision
+0       string  PACK    
+# real Quake examples like pak0.pak have only some hundreds like 150 files
+# So test for few files
+>8	ulelong <0x01000000	
+# in file version 5.32 test for null terminator is only true for
+# offset ~< FILE_BYTES_MAX = 1 MB defined in ../../src/file.h 
+# look for null terminator of 1st entry name
+>>(4.l+55)	ubyte	0	Quake I or II world or extension
+!:mime	application/x-dzip
+!:ext	pak
+#>>>8	ulelong	x	\b, table size %u
+# dividing this by entry size (64) gives number of files
+>>>8	ulelong/64 x	\b, %u files
+# offset to the beginning of the file table
+>>>4	ulelong	x	\b, offset 0x%x
+# 1st file entry
+>>>(4.l)	use	pak-entry
+# 2nd file entry
+#>>>4	ulelong+64	x	\b, offset 0x%x
+#>>>(4.l+64)	use	pak-entry
+#
+#	display file table entry of Quake PAK archive
+0	name		pak-entry
+# normally entry start after header which implies offset 12 or higher
+>56	ulelong	>11	
+# the offset from the beginning of pak to beginning of this entry file contents
+>>56	ulelong	x	at 0x%x
+# the size of file for this entry 
+>>60	ulelong	x	%u bytes
+# 56 byte null-terminated entry name string includes path like maps/e1m1.bsp
+>>0	string	x	'%-.56s'
+# inspect entry content by jumping to entry offset
+>>(56)	indirect x	\b: 
 
 #0       string  -1\x0a  Quake I demo
 #>30     string  x        version %.4s
-#>61     string  x        level %s       
+#>61     string  x        level %s
 
 #0       string  5\x0a   Quake I save
 
@@ -145,7 +182,7 @@
 
 
 0	string	MComprHD	MAME CHD compressed hard disk image,
->12	belong	x		version %lu
+>12	belong	x		version %u
 
 # doom - submitted by Jon Dowland
 
@@ -154,6 +191,11 @@
 0	string	=PWAD		doom patch PWAD data
 >4	lelong	x		containing %d lumps
 
+# Build engine group files (Duke Nukem, Shadow Warrior, ...)
+# Extension: .grp
+# Created by: "Ganael Laplanche" <ganael.laplanche@martymac.org>
+0	string	KenSilverman	Build engine group file
+>12	lelong	x		containing %d files
 
 # Summary: Warcraft 3 save
 # Extension: .w3g
@@ -169,12 +211,12 @@
 
 # Summary: SGF Smart Game Format
 # Extension: .sgf
-# Reference: http://www.red-bean.com/sgf/
+# Reference: https://www.red-bean.com/sgf/
 # Created by: Eduardo Sabbatella <eduardo_sabbatella@yahoo.com.ar>
 # Modified by (1): Abel Cheung (regex, more game format)
 # FIXME: Some games don't have GM (game type)
 0	regex		\\(;.*GM\\[[0-9]{1,2}\\]	Smart Game Format
->2	search/0x200	GM[
+>2	search/0x200/b	GM[
 >>&0	string		1]	(Go)
 >>&0	string		2]	(Othello)
 >>&0	string		3]	(chess)
@@ -216,13 +258,6 @@
 >>&0	string		39]	(Gipf)
 >>&0	string		40]	(Kropki)
 
-
-# Summary: Civilization 4 video
-# Extension: .bik
-# Created by: Abel Cheung <abelcheung@gmail.com>
-0	string	BIKi	Civilization 4 Video
-
-
 ##############################################
 # NetImmerse/Gamebryo game engine entries
 
@@ -241,7 +276,26 @@
 # Summary: NetImmerse game engine file
 # Extension .nif
 # Created by: Abel Cheung <abelcheung@gmail.com>
-0		string		NetImmerse\ File\ Format,\ Versio		
+0		string		NetImmerse\ File\ Format,\ Versio
 >&0		string		n\ 					NetImmerse game engine file
 >>&0		regex		[0-9a-z.]+				\b, version %s
 
+# Type:	SGF Smart Game Format
+# URL:	https://www.red-bean.com/sgf/
+# From:	Eduardo Sabbatella <eduardo_sabbatella@yahoo.com.ar>
+2	regex/c	\\(;.*GM\\[[0-9]{1,2}\\]	Smart Game Format
+>2	regex/c	GM\\[1\\]			- Go Game
+>2	regex/c	GM\\[6\\]			- BackGammon Game
+>2	regex/c	GM\\[11\\]			- Hex Game
+>2	regex/c	GM\\[18\\]			- Amazons Game
+>2	regex/c	GM\\[19\\]			- Octi Game
+>2	regex/c	GM\\[20\\]			- Gess Game
+>2	regex/c	GM\\[21\\]			- twix Game
+
+# Epic Games/Unreal Engine Package
+#
+0	lelong		0x9E2A83C1	Unreal Engine Package,
+>4	leshort		x		version: %i
+>12	lelong		!0		\b, names: %i
+>28	lelong		!0		\b, imports: %i
+>20	lelong		!0		\b, exports: %i

@@ -1,9 +1,9 @@
 
 #------------------------------------------------------------------------------
-# $File: apple,v 1.23 2009/09/19 16:28:08 christos Exp $
+# $File: apple,v 1.43 2019/04/19 00:42:27 christos Exp $
 # apple:  file(1) magic for Apple file formats
 #
-0	search/1	FiLeStArTfIlEsTaRt	binscii (apple ][) text
+0	search/1/t	FiLeStArTfIlEsTaRt	binscii (apple ][) text
 0	string		\x0aGL			Binary II (apple ][) data
 0	string		\x76\xff		Squeezed (apple ][) data
 0	string		NuFile			NuFile archive (apple ][) data
@@ -11,22 +11,97 @@
 0	belong		0x00051600		AppleSingle encoded Macintosh file
 0	belong		0x00051607		AppleDouble encoded Macintosh file
 
+# Type: Apple Emulator WOZ format
+# From: Greg Wildman <greg@apple2.org.za>
+# Ref: https://applesaucefdc.com/woz/reference/
+# Ref: https://applesaucefdc.com/woz/reference2/
+#
+# Note: The following test are mostly identical. I would rather not
+# use a regex to identify the WOZ format number.
+0	string		WOZ1
+>4	string		\xFF\x0A\x0D\x0A	Apple ][ WOZ 1.0 Disk Image
+>12	string		INFO
+>>21	byte		01			\b, 5.25 inch
+>>21	byte		02			\b, 3.5 inch
+>>22	byte		01			\b, write protected
+>>23	byte		01			\b, cross track synchronized
+>>25	string/T	x			\b, %.32s
+0	string		WOZ2
+>4	string		\xFF\x0A\x0D\x0A	Apple ][ WOZ 2.0 Disk Image
+>12	string		INFO
+>>21	byte		01			\b, 5.25 inch
+>>21	byte		02			\b, 3.5 inch
+>>22	byte		01			\b, write protected
+>>23	byte		01			\b, cross track synchronized
+>>25	string/T	x			\b, %.32s
+
+# Type: Apple Emulator disk images
+# From: Greg Wildman <greg@apple2.org.za>
+# ProDOS boot loader?
+0		string	\x01\x38\xB0\x03\x4C	Apple ProDOS Image
+# Detect Volume Directory block ($02)
+>0x400		string	\x00\x00\x03\x00
+>>0x404		byte	&0xF0
+>>>0x405	string	x			\b, Volume /%s
+>>>0x429	leshort	x			\b, %u Blocks
+# ProDOS ordered ?
+>0xb00		string	\x00\x00\x03\x00
+>>0xb04		byte	&0xF0
+>>>0xb05	string	x			\b, Volume /%s
+>>>0xb29	leshort	x			\b, %u Blocks
+#
+# DOS3.3 boot loader?
+0		string	\x01\xA5\x27\xC9\x09\xD0\x18\xA5\x2B
+>0x11001	string	\x11\x0F\x03	Apple DOS 3.3 Image
+>>0x11006	byte	x		\b, Volume %u
+>>0x11034	byte	x		\b, %u Tracks
+>>0x11035	byte	x		\b, %u Sectors
+>>0x11036	leshort	x		\b, %u bytes per sector
+# DOS3.2 ?
+>0x11001	string	\x11\x0C\x02	Apple DOS 3.2 Image
+>>0x11006	byte	x		\b, Volume %u
+>>0x11034	byte	x		\b, %u Tracks
+>>0x11035	byte	x		\b, %u Sectors
+>>0x11036	leshort	x		\b, %u bytes per sector
+# DOS3.1 ?
+>0x11001	string	\x11\x0C\x01
+>>0x11c00	string	\x00\x11\x0B	Apple DOS 3.1 Image
+#
+# Pascal boot loader?
+0		string	\x01\xE0\x60\xF0\x03\x4C\xE3\x08\xAD
+>0xd6		pstring SYSTEM.APPLE
+>>0xb00		leshort	0x0000
+>>>0xb04	leshort 0x0000		Apple Pascal Image
+>>>>0xb06	pstring x		\b, Volume %s:
+>>>>0xb0e	leshort x		\b, %u Blocks
+>>>>0xb10	leshort x		\b, %u Files
+
 # Type: Apple Emulator 2IMG format
 # From: Radek Vokal <rvokal@redhat.com>
-0	string		2IMG	Apple ][ 2IMG Disk Image
->4	string		XGS!	\b, XGS
->4	string		CTKG	\b, Catakig
->4	string		ShIm	\b, Sheppy's ImageMaker
->4	string		WOOF	\b, Sweet 16
->4	string		B2TR	\b, Bernie ][ the Rescue
->4	string		!nfc	\b, ASIMOV2
->4	string		x	\b, Unknown Format
->0xc	byte		00	\b, DOS 3.3 sector order
->>0x10	byte		00	\b, Volume 254
->>0x10	byte&0x7f	x	\b, Volume %u
->0xc	byte		01	\b, ProDOS sector order
->>0x14	short		x	\b, %u Blocks
->0xc	byte		02	\b, NIB data
+# Update: Greg Wildman <greg@apple2.org.za>
+0	string		2IMG		Apple ][ 2IMG Disk Image
+>4	clear		x
+>4	string		XGS!		\b, XGS
+>4	string		CTKG		\b, Catakig
+>4	string		ShIm		\b, Sheppy's ImageMaker
+>4	string		SHEP		\b, Sheppy's ImageMaker
+>4	string		WOOF		\b, Sweet 16
+>4	string		B2TR		\b, Bernie ][ the Rescue
+>4	string		\!nfc		\b, ASIMOV2
+>4	string		\>BD\<		\b, Brutal Deluxe's Cadius
+>4	string		CdrP		\b, CiderPress
+>4	string		Vi][		\b, Virtual ][
+>4	string		PRFS		\b, ProFUSE
+>4	string		FISH		\b, FishWings
+>4	string		RVLW		\b, Revival for Windows
+>4	default		x
+>>4	string		x		\b, Creator tag "%-4.4s"
+>0xc	byte		00		\b, DOS 3.3 sector order
+>>0x10	byte		00		\b, Volume 254
+>>0x10	byte&0x7f	x		\b, Volume %u
+>0xc	byte		01		\b, ProDOS sector order
+>>0x14	short		x		\b, %u Blocks
+>0xc	byte		02		\b, NIB data
 
 # magic for Newton PDA package formats
 # from Ruda Moura <ruda@helllabs.org>
@@ -65,18 +140,48 @@
 # Eric Fischer <enf@pobox.com>
 
 # AppleWorks word processor:
-#
-# This matches the standard tab stops for an AppleWorks file, but if
-# a file has a tab stop set in the first four columns this will fail.
-#
+# URL: https://en.wikipedia.org/wiki/AppleWorks
+# Reference: http://www.gno.org/pub/apple2/doc/apple/filetypes/ftn.1a.xxxx
+# Update: Joerg Jenderek
+# NOTE:
 # The "O" is really the magic number, but that's so common that it's
 # necessary to check the tab stops that follow it to avoid false positives.
-
-4       string          O====   AppleWorks word processor data
->85     byte&0x01       >0      \b, zoomed
->90     byte&0x01       >0      \b, paginated
->92     byte&0x01       >0      \b, with mail merge
-#>91    byte            x       \b, left margin %d
+# and/or look for unused bits of booleans bytes like zoom, paginated, mail merge
+# the newer AppleWorks is from claris with extension CWK
+4	string		O
+# test for unused bits of zoom- , paginated-boolean bytes
+>84	ubequad		^0x00Fe00000000Fe00
+# look for tabstop definitions "=" no tab, "|" no tab
+# "<" left tab,"^" center tab,">" right tab, "." decimal tab,
+# unofficial "!" other , "\x8a" other
+# official only if SFMinVers is nonzero
+>>5	regex/s	[=.<>|!^\x8a]{79}	AppleWorks Word Processor
+# AppleWorks Word Processor File (Apple II)
+# ./apple (version 5.25) labeled the entry as "AppleWorks word processor data"
+# application/x-appleworks is mime type for claris version with cwk extension
+!:mime	application/x-appleworks3
+# http://home.earthlink.net/~hughhood/appleiiworksenvoy/
+# ('p' + 1-byte ProDOS File Type + 2-byte ProDOS Aux Type')
+# $70 $1A $F8 $FF is this the apple type ?
+#:apple pdosp^Z\xf8\xff
+!:ext awp
+# minimum version needed to read this files. SFMinVers (0 , 30~3.0 )
+>>>183	ubyte		30	3.0
+>>>183	ubyte		!30
+>>>>183	ubyte		!0	0x%x
+# usual tabstop start sequence "=====<"
+>>>5	string		x	\b, tabstop ruler "%6.6s"
+# tabstop ruler
+#>>>5	string		>\0	\b, tabstops "%-79s"
+# zoom switch
+>>>85	  byte&0x01	>0	\b, zoomed
+# whether paginated
+>>>90	  byte&0x01	>0	\b, paginated
+# contains any mail-merge commands
+>>>92	  byte&0x01	>0	\b, with mail merge
+# left margin in 1/10 inches ( normally 0 or 10 )
+>>>91	ubyte		>0
+>>>>91	ubyte		x	\b, %d/10 inch left margin
 
 # AppleWorks database:
 #
@@ -106,12 +211,17 @@
 # This is incredibly sloppy, but will be true if the program was
 # written at its usual memory location of 2048 and its first line
 # number is less than 256.  Yuck.
+# update by Joerg Jenderek at Feb 2013
 
-0       belong&0xff00ff 0x80000 Applesoft BASIC program data
+# GRR: this test is still too general as it catches also Gujin BOOT144.SYS (0xfa080000)
+#0       belong&0xff00ff 0x80000 Applesoft BASIC program data
+0	belong&0x00ff00ff	0x00080000
+# assuming that line number must be positive
+>2	leshort			>0		Applesoft BASIC program data, first line number %d
 #>2     leshort         x       \b, first line number %d
 
 # ORCA/EZ assembler:
-# 
+#
 # This will not identify ORCA/M source files, since those have
 # some sort of date code instead of the two zero bytes at 6 and 7
 # XXX Conflicts with ELF
@@ -151,18 +261,18 @@
 # From Johan Gade.
 # These entries are disabled for now until we fix the following issues.
 #
-# Note there might be some problems with the "VAX COFF executable" 
-# entry. Note this entry should be placed before the mac filesystem section, 
+# Note there might be some problems with the "VAX COFF executable"
+# entry. Note this entry should be placed before the mac filesystem section,
 # particularly the "Apple Partition data" entry.
 #
-# The intended meaning of these tests is, that the file is only of the 
+# The intended meaning of these tests is, that the file is only of the
 # specified type if both of the lines are correct - i.e. if the first
 # line matches and the second doesn't then it is not of that type.
 #
 #0	long	0x7801730d
 #>4	long	0x62626060	UDIF read-only zlib-compressed image (UDZO)
 #
-# Note that this entry is recognized correctly by the "Apple Partition 
+# Note that this entry is recognized correctly by the "Apple Partition
 # data" entry - however since this entry is more specific - this
 # information seems to be more useful.
 #0	long	0x45520200
@@ -199,15 +309,15 @@
 #  purposes in YellowStep/Cocoa, including some nib files.
 # From: David Remahl <dremahl@apple.com>
 2		string		typedstream	NeXT/Apple typedstream data, big endian
->0		byte		x		\b, version %hhd
+>0		byte		x		\b, version %d
 >0		byte		<5		\b
 >>13	byte		0x81	\b
->>>14	ubeshort	x		\b, system %hd
+>>>14	ubeshort	x		\b, system %d
 2		string		streamtyped NeXT/Apple typedstream data, little endian
->0		byte		x		\b, version %hhd
+>0		byte		x		\b, version %d
 >0		byte		<5		\b
 >>13	byte		0x81	\b
->>>14	uleshort	x		\b, system %hd
+>>>14	uleshort	x		\b, system %d
 
 #------------------------------------------------------------------------------
 # CAF: Apple CoreAudio File Format
@@ -249,3 +359,166 @@
 # From: "Nelson A. de Oliveira" <naoliv@gmail.com>
 # .vdi
 4	string innotek\ VirtualBox\ Disk\ Image %s
+
+# Apple disk partition stuff
+# URL: https://en.wikipedia.org/wiki/Apple_Partition_Map
+# Reference: https://ftp.netbsd.org/pub/NetBSD/NetBSD-current/src/sys/sys/bootblock.h
+# Update: Joerg Jenderek
+# "ER" is APPLE_DRVR_MAP_MAGIC signature
+0	beshort	0x4552
+# display Apple Driver Map (strength=50) after Syslinux bootloader (71)
+#!:strength +0
+# strengthen the magic by looking for used blocksizes 512 2048
+>2	ubeshort&0xf1FF		0	Apple Driver Map
+# last 6 bytes for padding found are 0 or end with 55AAh marker for MBR hybrid
+#>>504	ubequad&0x0000FFffFFff0000	0
+!:mime	application/x-apple-diskimage
+!:apple	????devr
+# https://en.wikipedia.org/wiki/Apple_Disk_Image
+!:ext	dmg/iso
+# sbBlkSize for driver descriptor map 512 2048
+>>2	beshort	x			\b, blocksize %d
+# sbBlkCount sometimes garbish like
+# 0xb0200000 for unzlibed install_flash_player_19.0.0.245_osx.dmg
+# 0xf2720100 for bunziped Firefox 48.0-2.dmg
+# 0xeb02ffff for super_grub2_disk_hybrid_2.02s3.iso
+# 0x00009090 by syslinux-6.03/utils/isohybrid.c
+>>4	ubelong	x			\b, blockcount %u
+# following device/driver information not very useful
+# device type 0 1 (37008 garbage for super_grub2_disk_hybrid_2.02s3.iso)
+>>8	ubeshort	x		\b, devtype %u
+# device id 0 1 (37008 garbage for super_grub2_disk_hybrid_2.02s3.iso)
+>>10	ubeshort	x		\b, devid %u
+# driver data 0 (2425393296 garbage for super_grub2_disk_hybrid_2.02s3.iso)
+>>12	ubelong		>0
+>>>12	ubelong		x		\b, driver data %u
+# number of driver descriptors sbDrvrCount <= 61
+# (37008 garbage for super_grub2_disk_hybrid_2.02s3.iso)
+>>16	ubeshort	x		\b, driver count %u
+# 61 * apple_drvr_descriptor[8]. information not very useful or same as in partition map
+# >>18	use		apple-driver-map
+# >>26	use		apple-driver-map
+# # ...
+# >>500	use		apple-driver-map
+# number of partitions is always same in every partition (map block count)
+#>>0x0204	ubelong		x	\b, %u partitions
+>>0x0204	ubelong		>0	\b, contains[@0x200]:
+>>>0x0200	use		apple-apm
+>>0x0204	ubelong		>1	\b, contains[@0x400]:
+>>>0x0400	use		apple-apm
+>>0x0204	ubelong		>2	\b, contains[@0x600]:
+>>>0x0600	use		apple-apm
+>>0x0204	ubelong		>3	\b, contains[@0x800]:
+>>>0x0800	use		apple-apm
+>>0x0204	ubelong		>4	\b, contains[@0xA00]:
+>>>0x0A00	use		apple-apm
+>>0x0204	ubelong		>5	\b, contains[@0xC00]:
+>>>0x0C00	use		apple-apm
+>>0x0204	ubelong		>6	\b, contains[@0xE00]:
+>>>0x0E00	use		apple-apm
+>>0x0204	ubelong		>7	\b, contains[@0x1000]:
+>>>0x1000	use		apple-apm
+#	display apple driver descriptor map (start-block, # blocks in sbBlkSize sizes, type)
+0	name				apple-driver-map
+>0	ubequad		!0
+# descBlock first block of driver
+>>0	ubelong	x			\b, driver start block %u
+# descSize driver size in blocks
+>>4	ubeshort	x		\b, size %u
+# descType driver system type 1 701h F8FFh FFFFh
+>>6	ubeshort	x		\b, type 0x%x
+
+# URL: https://en.wikipedia.org/wiki/Apple_Partition_Map
+# Reference: https://opensource.apple.com/source/IOStorageFamily/IOStorageFamily-116/IOApplePartitionScheme.h
+# Update: Joerg Jenderek
+# Yes, the 3rd and 4th bytes pmSigPad are reserved, but we use them to make the
+# magic stronger.
+# for apple partition map stored as a single file
+0	belong	0x504d0000
+# to display Apple Partition Map (strength=70) after Syslinux bootloader (71)
+#!:strength +0
+>0	use		apple-apm
+# magic/Magdir/apple14.test, 365: Warning: Current entry does not yet have a description for adding a EXTENSION type
+# file: could not find any valid magic files!
+#!:ext	bin
+#	display apple partition map. Normally called after Apple driver map
+0	name				apple-apm
+>0	belong	0x504d0000		Apple Partition Map
+# number of partitions
+>>4	ubelong	x			\b, map block count %u
+# logical block (512 bytes) start of partition
+>>8	ubelong	x			\b, start block %u
+>>12	ubelong	x			\b, block count %u
+>>16	string >0			\b, name %s
+>>48	string >0			\b, type %s
+# processor type dpme_process_id[16] e.g. "68000" "68020"
+>>120	string >0			\b, processor %s
+# A/UX boot arguments BootArgs[128]
+>>136	string >0			\b, boot arguments %s
+# status of partition dpme_flags
+>>88	belong	& 1			\b, valid
+>>88	belong	& 2			\b, allocated
+>>88	belong	& 4			\b, in use
+>>88	belong	& 8			\b, has boot info
+>>88	belong	& 16			\b, readable
+>>88	belong	& 32			\b, writable
+>>88	belong	& 64			\b, pic boot code
+>>88	belong	& 128			\b, chain compatible driver
+>>88	belong	& 256			\b, real driver
+>>88	belong	& 512			\b, chain driver
+# mount automatically at startup APPLE_PS_AUTO_MOUNT
+>>88	ubelong	&0x40000000		\b, mount at startup
+# is the startup partition APPLE_PS_STARTUP
+>>88	ubelong	&0x80000000		\b, is the startup partition
+
+#https://wiki.mozilla.org/DS_Store_File_Format
+#https://en.wikipedia.org/wiki/.DS_Store
+0	string	\0\0\0\1Bud1\0		Apple Desktop Services Store
+
+# HFS/HFS+ Resource fork files (andrew.roazen@nau.edu Apr 13 2015)
+# Usually not in separate files, but have either filename rsrc with
+# no extension, or a filename corresponding to another file, with
+# extensions rsr/rsrc
+0	string  \000\000\001\000
+>4	leshort 0
+>>16	lelong  0			Apple HFS/HFS+ resource fork
+
+#https://en.wikipedia.org/wiki/AppleScript
+0	string	FasdUAS			AppleScript compiled
+
+# AppleWorks/ClarisWorks
+# https://github.com/joshenders/appleworks_format
+# http://fileformats.archiveteam.org/wiki/AppleWorks
+0	name			appleworks
+>0	belong&0x00ffffff	0x07e100	AppleWorks CWK Document
+>0	belong&0x00ffffff	0x008803	ClarisWorks CWK Document
+>0	default			x
+>>0	belong			x		AppleWorks/ClarisWorks CWK Document
+>0	byte			x		\b, version %d
+>30	beshort			x		\b, %d
+>32	beshort			x		\bx%d
+!:ext cwk
+
+4	string	BOBO
+>0	byte	>4
+>>12	belong	0
+>>>26	belong	0
+>>>>0	use	appleworks
+>0	belong	0x0481ad00
+>>0	use 	appleworks
+
+# magic for Apple File System (APFS)
+# from Alex Myczko <alex@aiei.ch>
+32		string	NXSB		Apple File System (APFS)
+>36		ulelong	x		\b, blocksize %u
+
+# iTunes cover art (versions 1 and 2)
+4		string	itch
+>24		string	artw
+>>0x1e8		string	data		iTunes cover art
+>>>0x1ed	string	PNG		(PNG)
+>>>0x1ec	beshort 0xffd8		(JPEG)
+
+# MacPaint image
+65		string	PNTGMPNT	MacPaint image data
+#0		belong	2		MacPaint image data

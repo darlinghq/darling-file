@@ -26,8 +26,7 @@
  * SUCH DAMAGE.
  */
 /*
- * ASCII magic -- file types that we know based on keywords
- * that can appear anywhere in the file.
+ * ASCII magic -- try to detect text encoding.
  *
  * Extensively modified by Eric Fischer <enf@pobox.com> in July, 2000,
  * to handle character codes other than ASCII on a unified basis.
@@ -36,7 +35,7 @@
 #include "file.h"
 
 #ifndef	lint
-FILE_RCSID("@(#)$File: ascmagic.c,v 1.75 2009/02/03 20:27:51 christos Exp $")
+FILE_RCSID("@(#)$File: ascmagic.c,v 1.104 2019/05/07 02:27:11 christos Exp $")
 #endif	/* lint */
 
 #include "magic.h"
@@ -47,13 +46,11 @@ FILE_RCSID("@(#)$File: ascmagic.c,v 1.75 2009/02/03 20:27:51 christos Exp $")
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
 #endif
-#include "names.h"
 
 #define MAXLINELEN 300	/* longest sane line length */
 #define ISSPC(x) ((x) == ' ' || (x) == '\t' || (x) == '\r' || (x) == '\n' \
 		  || (x) == 0x85 || (x) == '\f')
 
-private int ascmatch(const unsigned char *, const unichar *, size_t);
 private unsigned char *encode_utf8(unsigned char *, size_t, unichar *, size_t);
 private size_t trim_nuls(const unsigned char *, size_t);
 
@@ -71,48 +68,52 @@ trim_nuls(const unsigned char *buf, size_t nbytes)
 }
 
 protected int
-file_ascmagic(struct magic_set *ms, const unsigned char *buf, size_t nbytes)
+file_ascmagic(struct magic_set *ms, const struct buffer *b, int text)
 {
 	unichar *ubuf = NULL;
-	size_t ulen;
+	size_t ulen = 0;
 	int rv = 1;
+	struct buffer bb;
 
 	const char *code = NULL;
 	const char *code_mime = NULL;
 	const char *type = NULL;
 
-	if (ms->flags & MAGIC_APPLE)
-		return 0;
-
-	nbytes = trim_nuls(buf, nbytes);
+	bb = *b;
+	bb.flen = trim_nuls(CAST(const unsigned char *, b->fbuf), b->flen);
+	/*
+	 * Avoid trimming at an odd byte if the original buffer was evenly
+	 * sized; this avoids losing the last character on UTF-16 LE text
+	 */
+	if ((bb.flen & 1) && !(b->flen & 1))
+		bb.flen++;
 
 	/* If file doesn't look like any sort of text, give up. */
-	if (file_encoding(ms, buf, nbytes, &ubuf, &ulen, &code, &code_mime,
-	    &type) == 0) {
+	if (file_encoding(ms, &bb, &ubuf, &ulen, &code, &code_mime,
+	    &type) == 0)
 		rv = 0;
-		goto done;
-	}
+        else
+		rv = file_ascmagic_with_encoding(ms, &bb,
+		    ubuf, ulen, code, type, text);
 
-	rv = file_ascmagic_with_encoding(ms, buf, nbytes, ubuf, ulen, code, 
-	    type);
-
- done:
-	if (ubuf)
-		free(ubuf);
+	free(ubuf);
 
 	return rv;
 }
 
 protected int
-file_ascmagic_with_encoding(struct magic_set *ms, const unsigned char *buf,
-    size_t nbytes, unichar *ubuf, size_t ulen, const char *code,
-    const char *type)
+file_ascmagic_with_encoding(struct magic_set *ms,
+    const struct buffer *b, unichar *ubuf, size_t ulen, const char *code,
+    const char *type, int text)
 {
+	struct buffer bb;
+	const unsigned char *buf = CAST(const unsigned char *, b->fbuf);
+	size_t nbytes = b->flen;
 	unsigned char *utf8_buf = NULL, *utf8_end;
-	size_t mlen, i;
-	const struct names *p;
+	size_t mlen, i, len;
 	int rv = -1;
 	int mime = ms->flags & MAGIC_MIME;
+	int need_separator = 0;
 
 	const char *subtype = NULL;
 	const char *subtype_mime = NULL;
@@ -125,12 +126,10 @@ file_ascmagic_with_encoding(struct magic_set *ms, const unsigned char *buf,
 	int n_lf = 0;
 	int n_cr = 0;
 	int n_nel = 0;
+	int executable = 0;
 
-	size_t last_line_end = (size_t)-1;
+	size_t last_line_end = CAST(size_t, -1);
 	int has_long_lines = 0;
-
-	if (ms->flags & MAGIC_APPLE)
-		return 0;
 
 	nbytes = trim_nuls(buf, nbytes);
 
@@ -140,55 +139,34 @@ file_ascmagic_with_encoding(struct magic_set *ms, const unsigned char *buf,
 		goto done;
 	}
 
-	/* Convert ubuf to UTF-8 and try text soft magic */
-	/* malloc size is a conservative overestimate; could be
-	   improved, or at least realloced after conversion. */
-	mlen = ulen * 6;
-	if ((utf8_buf = CAST(unsigned char *, malloc(mlen))) == NULL) {
-		file_oomem(ms, mlen);
-		goto done;
-	}
-	if ((utf8_end = encode_utf8(utf8_buf, mlen, ubuf, ulen)) == NULL)
-		goto done;
-	if ((rv = file_softmagic(ms, utf8_buf, (size_t)(utf8_end - utf8_buf),
-	    TEXTTEST)) != 0)
-		goto done;
-	else
-		rv = -1;
-
-	/* look for tokens from names.h - this is expensive! */
-	if ((ms->flags & MAGIC_NO_CHECK_TOKENS) != 0)
-		goto subtype_identified;
-
-	i = 0;
-	while (i < ulen) {
-		size_t end;
-
-		/* skip past any leading space */
-		while (i < ulen && ISSPC(ubuf[i]))
-			i++;
-		if (i >= ulen)
-			break;
-
-		/* find the next whitespace */
-		for (end = i + 1; end < nbytes; end++)
-			if (ISSPC(ubuf[end]))
-				break;
-
-		/* compare the word thus isolated against the token list */
-		for (p = names; p < names + NNAMES; p++) {
-			if (ascmatch((const unsigned char *)p->name, ubuf + i,
-			    end - i)) {
-				subtype = types[p->type].human;
-				subtype_mime = types[p->type].mime;
-				goto subtype_identified;
-			}
+	if (ulen > 0 && (ms->flags & MAGIC_NO_CHECK_SOFT) == 0) {
+		/* Convert ubuf to UTF-8 and try text soft magic */
+		/* malloc size is a conservative overestimate; could be
+		   improved, or at least realloced after conversion. */
+		mlen = ulen * 6;
+		if ((utf8_buf = CAST(unsigned char *, malloc(mlen))) == NULL) {
+			file_oomem(ms, mlen);
+			goto done;
 		}
+		if ((utf8_end = encode_utf8(utf8_buf, mlen, ubuf, ulen))
+		    == NULL)
+			goto done;
+		buffer_init(&bb, b->fd, &b->st, utf8_buf,
+		    CAST(size_t, utf8_end - utf8_buf));
 
-		i = end;
+		if ((rv = file_softmagic(ms, &bb, NULL, NULL,
+		    TEXTTEST, text)) == 0)
+			rv = -1;
+		else
+			need_separator = 1;
+		buffer_fini(&bb);
+		if ((ms->flags & (MAGIC_APPLE|MAGIC_EXTENSION))) {
+			rv = rv == -1 ? 0 : 1;
+			goto done;
+		}
 	}
-
-subtype_identified:
+	if ((ms->flags & (MAGIC_APPLE|MAGIC_EXTENSION)))
+		return 0;
 
 	/* Now try to discover other details about the file. */
 	for (i = 0; i < ulen; i++) {
@@ -221,18 +199,31 @@ subtype_identified:
 	}
 
 	/* Beware, if the data has been truncated, the final CR could have
-	   been followed by a LF.  If we have HOWMANY bytes, it indicates
+	   been followed by a LF.  If we have ms->bytes_max bytes, it indicates
 	   that the data might have been truncated, probably even before
 	   this function was called. */
-	if (seen_cr && nbytes < HOWMANY)
+	if (seen_cr && nbytes < ms->bytes_max)
 		n_cr++;
 
 	if (strcmp(type, "binary") == 0) {
 		rv = 0;
 		goto done;
 	}
+	len = file_printedlen(ms);
 	if (mime) {
 		if ((mime & MAGIC_MIME_TYPE) != 0) {
+			if (len) {
+				/*
+				 * Softmagic printed something, we
+				 * are either done, or we need a separator
+				 */
+				if ((ms->flags & MAGIC_CONTINUE) == 0) {
+					rv = 1;
+					goto done;
+				}
+				if (need_separator && file_separator(ms) == -1)
+					goto done;
+			}
 			if (subtype_mime) {
 				if (file_printf(ms, "%s", subtype_mime) == -1)
 					goto done;
@@ -242,6 +233,34 @@ subtype_identified:
 			}
 		}
 	} else {
+		if (len) {
+#ifdef __APPLE__
+			if (file_printf(ms, ", ") == -1)
+				goto done;
+#else
+			switch (file_replace(ms, " text$", ", ")) {
+			case 0:
+				switch (file_replace(ms, " text executable$",
+				    ", ")) {
+				case 0:
+					if (file_printf(ms, ", ") == -1)
+						goto done;
+					break;
+				case -1:
+					goto done;
+				default:
+					executable = 1;
+					break;
+				}
+				break;
+			case -1:
+				goto done;
+			default:
+				break;
+			}
+#endif
+		}
+
 		if (file_printf(ms, "%s", code) == -1)
 			goto done;
 
@@ -252,6 +271,10 @@ subtype_identified:
 
 		if (file_printf(ms, " %s", type) == -1)
 			goto done;
+
+		if (executable)
+			if (file_printf(ms, " executable") == -1)
+				goto done;
 
 		if (has_long_lines)
 			if (file_printf(ms, ", with very long lines") == -1)
@@ -309,26 +332,9 @@ subtype_identified:
 	}
 	rv = 1;
 done:
-	if (utf8_buf)
-		free(utf8_buf);
+	free(utf8_buf);
 
 	return rv;
-}
-
-private int
-ascmatch(const unsigned char *s, const unichar *us, size_t ulen)
-{
-	size_t i;
-
-	for (i = 0; i < ulen; i++) {
-		if (s[i] != us[i])
-			return 0;
-	}
-
-	if (s[i])
-		return 0;
-	else
-		return 1;
 }
 
 /*
@@ -345,42 +351,42 @@ encode_utf8(unsigned char *buf, size_t len, unichar *ubuf, size_t ulen)
 		if (ubuf[i] <= 0x7f) {
 			if (end - buf < 1)
 				return NULL;
-			*buf++ = (unsigned char)ubuf[i];
+			*buf++ = CAST(unsigned char, ubuf[i]);
 		} else if (ubuf[i] <= 0x7ff) {
 			if (end - buf < 2)
 				return NULL;
-			*buf++ = (unsigned char)((ubuf[i] >> 6) + 0xc0);
-			*buf++ = (unsigned char)((ubuf[i] & 0x3f) + 0x80);
+			*buf++ = CAST(unsigned char, (ubuf[i] >> 6) + 0xc0);
+			*buf++ = CAST(unsigned char, (ubuf[i] & 0x3f) + 0x80);
 		} else if (ubuf[i] <= 0xffff) {
 			if (end - buf < 3)
 				return NULL;
-			*buf++ = (unsigned char)((ubuf[i] >> 12) + 0xe0);
-			*buf++ = (unsigned char)(((ubuf[i] >> 6) & 0x3f) + 0x80);
-			*buf++ = (unsigned char)((ubuf[i] & 0x3f) + 0x80);
+			*buf++ = CAST(unsigned char, (ubuf[i] >> 12) + 0xe0);
+			*buf++ = CAST(unsigned char, ((ubuf[i] >> 6) & 0x3f) + 0x80);
+			*buf++ = CAST(unsigned char, (ubuf[i] & 0x3f) + 0x80);
 		} else if (ubuf[i] <= 0x1fffff) {
 			if (end - buf < 4)
 				return NULL;
-			*buf++ = (unsigned char)((ubuf[i] >> 18) + 0xf0);
-			*buf++ = (unsigned char)(((ubuf[i] >> 12) & 0x3f) + 0x80);
-			*buf++ = (unsigned char)(((ubuf[i] >>  6) & 0x3f) + 0x80);
-			*buf++ = (unsigned char)((ubuf[i] & 0x3f) + 0x80);
+			*buf++ = CAST(unsigned char, (ubuf[i] >> 18) + 0xf0);
+			*buf++ = CAST(unsigned char, ((ubuf[i] >> 12) & 0x3f) + 0x80);
+			*buf++ = CAST(unsigned char, ((ubuf[i] >>  6) & 0x3f) + 0x80);
+			*buf++ = CAST(unsigned char, (ubuf[i] & 0x3f) + 0x80);
 		} else if (ubuf[i] <= 0x3ffffff) {
 			if (end - buf < 5)
 				return NULL;
-			*buf++ = (unsigned char)((ubuf[i] >> 24) + 0xf8);
-			*buf++ = (unsigned char)(((ubuf[i] >> 18) & 0x3f) + 0x80);
-			*buf++ = (unsigned char)(((ubuf[i] >> 12) & 0x3f) + 0x80);
-			*buf++ = (unsigned char)(((ubuf[i] >>  6) & 0x3f) + 0x80);
-			*buf++ = (unsigned char)((ubuf[i] & 0x3f) + 0x80);
+			*buf++ = CAST(unsigned char, (ubuf[i] >> 24) + 0xf8);
+			*buf++ = CAST(unsigned char, ((ubuf[i] >> 18) & 0x3f) + 0x80);
+			*buf++ = CAST(unsigned char, ((ubuf[i] >> 12) & 0x3f) + 0x80);
+			*buf++ = CAST(unsigned char, ((ubuf[i] >>  6) & 0x3f) + 0x80);
+			*buf++ = CAST(unsigned char, (ubuf[i] & 0x3f) + 0x80);
 		} else if (ubuf[i] <= 0x7fffffff) {
 			if (end - buf < 6)
 				return NULL;
-			*buf++ = (unsigned char)((ubuf[i] >> 30) + 0xfc);
-			*buf++ = (unsigned char)(((ubuf[i] >> 24) & 0x3f) + 0x80);
-			*buf++ = (unsigned char)(((ubuf[i] >> 18) & 0x3f) + 0x80);
-			*buf++ = (unsigned char)(((ubuf[i] >> 12) & 0x3f) + 0x80);
-			*buf++ = (unsigned char)(((ubuf[i] >>  6) & 0x3f) + 0x80);
-			*buf++ = (unsigned char)((ubuf[i] & 0x3f) + 0x80);
+			*buf++ = CAST(unsigned char, (ubuf[i] >> 30) + 0xfc);
+			*buf++ = CAST(unsigned char, ((ubuf[i] >> 24) & 0x3f) + 0x80);
+			*buf++ = CAST(unsigned char, ((ubuf[i] >> 18) & 0x3f) + 0x80);
+			*buf++ = CAST(unsigned char, ((ubuf[i] >> 12) & 0x3f) + 0x80);
+			*buf++ = CAST(unsigned char, ((ubuf[i] >>  6) & 0x3f) + 0x80);
+			*buf++ = CAST(unsigned char, (ubuf[i] & 0x3f) + 0x80);
 		} else /* Invalid character */
 			return NULL;
 	}

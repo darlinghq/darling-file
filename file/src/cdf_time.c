@@ -27,7 +27,7 @@
 #include "file.h"
 
 #ifndef lint
-FILE_RCSID("@(#)$File: cdf_time.c,v 1.8 2009/06/20 20:47:30 christos Exp $")
+FILE_RCSID("@(#)$File: cdf_time.c,v 1.19 2019/03/12 20:43:05 christos Exp $")
 #endif
 
 #include <time.h>
@@ -45,12 +45,6 @@ static const int mdays[] = {
     31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
 };
 
-#ifdef __DJGPP__
-#define timespec timeval
-#define tv_nsec tv_usec
-#endif
-
-
 /*
  * Return the number of days between jan 01 1601 and jan 01 of year.
  */
@@ -62,7 +56,7 @@ cdf_getdays(int year)
 
 	for (y = CDF_BASE_YEAR; y < year; y++)
 		days += isleap(y) + 365;
-		
+
 	return days;
 }
 
@@ -74,7 +68,7 @@ cdf_getday(int year, int days)
 {
 	size_t m;
 
-	for (m = 0; m < sizeof(mdays) / sizeof(mdays[0]); m++) {
+	for (m = 0; m < __arraycount(mdays); m++) {
 		int sub = mdays[m] + (m == 1 && isleap(year));
 		if (days < sub)
 			return days;
@@ -83,7 +77,7 @@ cdf_getday(int year, int days)
 	return days;
 }
 
-/* 
+/*
  * Return the 0...11 month number.
  */
 static int
@@ -91,14 +85,14 @@ cdf_getmonth(int year, int days)
 {
 	size_t m;
 
-	for (m = 0; m < sizeof(mdays) / sizeof(mdays[0]); m++) {
+	for (m = 0; m < __arraycount(mdays); m++) {
 		days -= mdays[m];
 		if (m == 1 && isleap(year))
 			days--;
 		if (days <= 0)
-			return (int)m;
+			return CAST(int, m);
 	}
-	return (int)m;
+	return CAST(int, m);
 }
 
 int
@@ -114,22 +108,22 @@ cdf_timestamp_to_timespec(struct timespec *ts, cdf_timestamp_t t)
 	ts->tv_nsec = (t % CDF_TIME_PREC) * 100;
 
 	t /= CDF_TIME_PREC;
-	tm.tm_sec = (int)(t % 60);
+	tm.tm_sec = CAST(int, t % 60);
 	t /= 60;
 
-	tm.tm_min = (int)(t % 60);
+	tm.tm_min = CAST(int, t % 60);
 	t /= 60;
 
-	tm.tm_hour = (int)(t % 24);
+	tm.tm_hour = CAST(int, t % 24);
 	t /= 24;
 
-	// XXX: Approx
-	tm.tm_year = (int)(CDF_BASE_YEAR + (t / 365));
+	/* XXX: Approx */
+	tm.tm_year = CAST(int, CDF_BASE_YEAR + (t / 365));
 
 	rdays = cdf_getdays(tm.tm_year);
-	t -= rdays;
-	tm.tm_mday = cdf_getday(tm.tm_year, (int)t);
-	tm.tm_mon = cdf_getmonth(tm.tm_year, (int)t);
+	t -= rdays - 1;
+	tm.tm_mday = cdf_getday(tm.tm_year, CAST(int, t));
+	tm.tm_mon = cdf_getmonth(tm.tm_year, CAST(int, t));
 	tm.tm_wday = 0;
 	tm.tm_yday = 0;
 	tm.tm_isdst = 0;
@@ -171,18 +165,30 @@ cdf_timespec_to_timestamp(cdf_timestamp_t *t, const struct timespec *ts)
 	return 0;
 }
 
+char *
+cdf_ctime(const time_t *sec, char *buf)
+{
+	char *ptr = ctime_r(sec, buf);
+	if (ptr != NULL)
+		return buf;
+	(void)snprintf(buf, 26, "*Bad* %#16.16" INT64_T_FORMAT "x\n",
+	    CAST(long long, *sec));
+	return buf;
+}
 
-#ifdef TEST
+
+#ifdef TEST_TIME
 int
 main(int argc, char *argv[])
 {
 	struct timespec ts;
+	char buf[25];
 	static const cdf_timestamp_t tst = 0x01A5E403C2D59C00ULL;
 	static const char *ref = "Sat Apr 23 01:30:00 1977";
 	char *p, *q;
 
 	cdf_timestamp_to_timespec(&ts, tst);
-	p = ctime(&ts.tv_sec);
+	p = cdf_ctime(&ts.tv_sec, buf);
 	if ((q = strchr(p, '\n')) != NULL)
 		*q = '\0';
 	if (strcmp(ref, p) != 0)
