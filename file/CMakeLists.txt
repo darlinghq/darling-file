@@ -60,13 +60,14 @@ if (NOT DARLING_NO_EXECUTABLES)
 	install(TARGETS file
 		DESTINATION libexec/darling/usr/bin)
 
-	install(FILES magic/magic.mgc
+	install(FILES ../gen/magic.mgc
 		DESTINATION libexec/darling/usr/share/file)
 	install(DIRECTORY magic/Magdir/
 		DESTINATION libexec/darling/usr/share/file/magic)
 
-	install(FILES ../file.1 DESTINATION libexec/darling/usr/share/man/man1)
-	install(FILES ../magic.5 DESTINATION libexec/darling/usr/share/man/man5)
+	install(FILES ../gen/file.1 DESTINATION libexec/darling/usr/share/man/man1)
+	install(FILES ../gen/libmagic.3 DESTINATION libexec/darling/usr/share/man/man3)
+	install(FILES ../gen/magic.5 DESTINATION libexec/darling/usr/share/man/man5)
 
 endif (NOT DARLING_NO_EXECUTABLES)
 
