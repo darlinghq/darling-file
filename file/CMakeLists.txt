@@ -25,18 +25,19 @@ set(libmagic_sources
 	src/apprentice.c
 	src/apptype.c
 	src/ascmagic.c
-	src/cdf.c
+	src/buffer.c
 	src/cdf_time.c
+	src/cdf.c
 	src/compress.c
+	src/der.c
 	src/encoding.c
 	src/fsmagic.c
-	src/der.c
 	src/funcs.c
+	src/is_csv.c
+	src/is_json.c
 	src/is_tar.c
 	src/magic.c
 	src/print.c
-	src/is_json.c
-	src/buffer.c
 	src/readcdf.c
 	src/readelf.c
 	src/readmacho.c
@@ -52,7 +53,9 @@ if (NOT DARLING_NO_EXECUTABLES)
 	add_darling_executable(file src/file.c)
 	target_link_libraries(file
 		magic
+		bz2
 		z
+		lzma
 
 		system
 	)
